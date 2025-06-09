@@ -79,6 +79,32 @@ spec:
             - name: socket-dir
               mountPath: /csi
         {{ end }}
+        - name: ex-snapshotter
+          image: quay.io/ocs-dev/csi-snapshotter:latest
+          args:
+            - "--csi-address=$(ADDRESS)"
+            - "--v={{ .SidecarLogLevel }}"
+            - "--timeout={{ .GRPCTimeout }}"
+            - "--leader-election=true"
+            - "--leader-election-namespace={{ .Namespace }}"
+            - "--leader-election-lease-duration={{ .LeaderElectionLeaseDuration }}"
+            - "--leader-election-renew-deadline={{ .LeaderElectionRenewDeadline }}"
+            - "--leader-election-retry-period={{ .LeaderElectionRetryPeriod }}"
+            - "--extra-create-metadata=true"
+            - "{{ .VolumeGroupSnapshotCLIFlag }}"
+            {{ if .KubeApiBurst }}
+            - "--kube-api-burst={{ .KubeApiBurst }}"
+            {{ end }}
+            {{ if .KubeApiQPS }}
+            - "--kube-api-qps={{ .KubeApiQPS }}"
+            {{ end }}
+          env:
+            - name: ADDRESS
+              value: unix:///csi/csi-provisioner.sock
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
         - name: csi-resizer
           image: {{ .ResizerImage }}
           args:
