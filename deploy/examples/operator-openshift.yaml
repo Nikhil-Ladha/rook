@@ -826,11 +826,8 @@ spec:
                   fieldPath: metadata.namespace
 
           resources:
-            limits:
-              cpu: 1
-              memory: 512Mi
             requests:
-              cpu: 100m
+              cpu: 50m
               memory: 128Mi
 
           #  Uncomment it to run lib bucket provisioner in multithreaded mode
