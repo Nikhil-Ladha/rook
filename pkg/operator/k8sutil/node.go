@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 
 	"sigs.k8s.io/yaml"
@@ -258,7 +259,7 @@ func NodeIsTolerable(node v1.Node, tolerations []v1.Toleration, ignoreWellKnownT
 		isTolerated := false
 		for _, toleration := range tolerations {
 			localtaint := taint
-			if toleration.ToleratesTaint(&localtaint) {
+			if toleration.ToleratesTaint(logr.New(nil), &localtaint, true) {
 				isTolerated = true
 				break
 			}
@@ -363,11 +364,11 @@ func GenerateNodeAffinity(nodeAffinity string) (*v1.NodeAffinity, error) {
 			},
 		},
 	}
-	nodeLabels := strings.Split(nodeAffinity, ";")
+	nodeLabels := strings.SplitSeq(nodeAffinity, ";")
 	// For each label in 'nodeLabels', retrieve (key,value) pair and create nodeAffinity
 	// '=' separates key from values
 	// ',' separates values
-	for _, nodeLabel := range nodeLabels {
+	for nodeLabel := range nodeLabels {
 		// If tmpNodeLabel is an array of length > 1
 		// [0] is Key and [1] is comma separated values
 		tmpNodeLabel := strings.Split(nodeLabel, "=")

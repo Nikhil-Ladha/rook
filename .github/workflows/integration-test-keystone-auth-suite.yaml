@@ -28,10 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kubernetes-versions: ["v1.29.15", "v1.33.3"]
+        kubernetes-version: ["v1.30.14", "v1.35.0"]
     steps:
       - name: checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 0
 
@@ -40,17 +40,17 @@ jobs:
         with:
           version: v3.18.2
 
-      - name: consider debugging
+      - name: consider (pre-job) debugging
         uses: ./.github/workflows/tmate_debug
         with:
           use-tmate: ${{ secrets.USE_TMATE }}
           debug-ci: ${{ contains(github.event.pull_request.labels.*.name, 'debug-ci') }}
 
-      - name: setup latest cluster resources
-        uses: ./.github/workflows/integration-test-config-latest-k8s
+      - name: setup cluster resources
+        uses: ./.github/workflows/integration-test-setup-cluster-resources
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          kubernetes-version: ${{ matrix.kubernetes-versions }}
+          kubernetes-version: ${{ matrix.kubernetes-version }}
 
       - name: TestCephKeystoneAuthSuite
         run: |
@@ -67,8 +67,13 @@ jobs:
           tests/scripts/collect-logs.sh
 
       - name: Artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         if: failure()
         with:
-          name: ceph-keystone-auth-suite-artifact-${{ matrix.kubernetes-versions }}
+          name: ceph-keystone-auth-suite-artifact-${{ matrix.kubernetes-version }}
           path: /home/runner/work/rook/rook/tests/integration/_output/tests/
+
+      - name: consider (post-job) debugging
+        uses: ./.github/workflows/upterm_debug
+        with:
+          debug-ci: ${{ contains(github.event.pull_request.labels.*.name, 'debug-ci') }}

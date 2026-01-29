@@ -23,6 +23,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/config/keyring"
+	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
+	"github.com/rook/rook/pkg/util/log"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -50,7 +52,7 @@ func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
 	}
 
 	if c.shouldRotateCephxKeys {
-		logger.Infof("rotating cephx key for CephFileSystem %q", m.ResourceName)
+		log.NamedInfo(opcontroller.NsName(c.fs.Namespace, c.fs.Name), logger, "rotating cephx key for CephFileSystem")
 		newKey, err := s.RotateKey(user)
 		if err != nil {
 			return "", errors.Wrapf(err, "failed to rotate cephx key for CephFileSystem %q", m.ResourceName)
@@ -63,9 +65,9 @@ func (c *Cluster) generateKeyring(m *mdsConfig) (string, error) {
 	err = c.context.Clientset.CoreV1().Secrets(c.fs.Namespace).Delete(c.clusterInfo.Context, m.ResourceName, metav1.DeleteOptions{})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			logger.Debugf("legacy mds key %s is already removed", m.ResourceName)
+			log.NamedDebug(opcontroller.NsName(c.fs.Namespace, c.fs.Name), logger, "legacy mds key %s is already removed", m.ResourceName)
 		} else {
-			logger.Warningf("legacy mds key %q could not be removed. %v", m.ResourceName, err)
+			log.NamedWarning(opcontroller.NsName(c.fs.Namespace, c.fs.Name), logger, "legacy mds key %q could not be removed. %v", m.ResourceName, err)
 		}
 	}
 
@@ -80,10 +82,20 @@ func (c *Cluster) setDefaultFlagsMonConfigStore(mdsID string) error {
 
 	// Set mds cache memory limit to the best appropriate value
 	if !c.fs.Spec.MetadataServer.Resources.Limits.Memory().IsZero() {
-		mdsCacheMemoryLimit := float64(c.fs.Spec.MetadataServer.Resources.Limits.Memory().Value()) * mdsCacheMemoryLimitFactor
+		// Use configured factor or fall back to default
+		limitFactor := mdsCacheMemoryLimitFactor
+		if c.fs.Spec.MetadataServer.CacheMemoryLimitFactor != nil {
+			limitFactor = *c.fs.Spec.MetadataServer.CacheMemoryLimitFactor
+		}
+		mdsCacheMemoryLimit := float64(c.fs.Spec.MetadataServer.Resources.Limits.Memory().Value()) * limitFactor
 		configOptions["mds_cache_memory_limit"] = strconv.Itoa(int(mdsCacheMemoryLimit))
 	} else if !c.fs.Spec.MetadataServer.Resources.Requests.Memory().IsZero() {
-		mdsCacheMemoryRequest := float64(c.fs.Spec.MetadataServer.Resources.Requests.Memory().Value()) * mdsCacheMemoryResourceFactor
+		// Use configured factor or fall back to default
+		requestFactor := mdsCacheMemoryRequestFactor
+		if c.fs.Spec.MetadataServer.CacheMemoryRequestFactor != nil {
+			requestFactor = *c.fs.Spec.MetadataServer.CacheMemoryRequestFactor
+		}
+		mdsCacheMemoryRequest := float64(c.fs.Spec.MetadataServer.Resources.Requests.Memory().Value()) * requestFactor
 		configOptions["mds_cache_memory_limit"] = strconv.Itoa(int(mdsCacheMemoryRequest))
 	}
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"testing"
 
 	"github.com/pkg/errors"
@@ -367,13 +368,13 @@ func TestConfigureCVDevices(t *testing.T) {
 			if command == "sgdisk" {
 				return "Disk identifier (GUID): 18484D7E-5287-4CE9-AC73-D02FB69055CE", nil
 			}
-			if contains(args, "lvm") && contains(args, "list") {
+			if slices.Contains(args, "lvm") && slices.Contains(args, "list") {
 				return `{}`, nil
 			}
 			if args[0] == "auth" && args[1] == "get-or-create-key" {
 				return "{\"key\":\"mysecurekey\"}", nil
 			}
-			if contains(args, "raw") && contains(args, "list") {
+			if slices.Contains(args, "raw") && slices.Contains(args, "list") {
 				return fmt.Sprintf(`{
 				"0": {
 					"ceph_fsid": "%s",
@@ -393,7 +394,7 @@ func TestConfigureCVDevices(t *testing.T) {
 				args[1] == "ceph-volume" && args[4] == "raw" && args[5] == "prepare" && args[6] == "--bluestore" && args[8] == "/mnt/set1-data-0-rpf2k" {
 				return "", nil
 			}
-			if contains(args, "lvm") && contains(args, "list") {
+			if slices.Contains(args, "lvm") && slices.Contains(args, "list") {
 				return `{}`, nil
 			}
 			return "", errors.Errorf("unknown command %s %s", command, args)
@@ -2045,15 +2046,6 @@ func TestAllowRawMode(t *testing.T) {
 	}
 }
 
-func contains(arr []string, str string) bool {
-	for _, a := range arr {
-		if a == str {
-			return true
-		}
-	}
-	return false
-}
-
 func TestAppendOSDInfo(t *testing.T) {
 	// Set 1: duplicate entries
 	{
@@ -2164,7 +2156,7 @@ func TestWipeDevicesFromOtherClusters(t *testing.T) {
 	executor := &exectest.MockExecutor{}
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
-		if contains(args, "raw") && contains(args, "list") {
+		if slices.Contains(args, "raw") && slices.Contains(args, "list") {
 			return cephVolumeRAWTestResult, nil
 		}
 		return "", errors.Errorf("unknown command %s %s", command, args)
@@ -2175,8 +2167,12 @@ func TestWipeDevicesFromOtherClusters(t *testing.T) {
 		devicePath := "/dev/vdb"
 		logger.Infof("%s %v", command, args)
 
-		if contains(args, "zap") {
-			if !contains(args, devicePath) {
+		if command == cryptsetupBinary && args[0] == "luksDump" {
+			return luksDump, nil
+		}
+
+		if slices.Contains(args, "zap") {
+			if !slices.Contains(args, devicePath) {
 				return "", errors.Errorf("device %s should not be zapped", devicePath)
 			}
 			return "", nil
@@ -2193,7 +2189,7 @@ func TestWipeDevicesFromOtherClusters(t *testing.T) {
 	// `ceph-volume raw list` returns dmcrypt devices on "vdb" and "vdc" but only "vdb" should be zapped
 	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
 		logger.Infof("%s %v", command, args)
-		if contains(args, "raw") && contains(args, "list") {
+		if slices.Contains(args, "raw") && slices.Contains(args, "list") {
 			return cephVolumeRAWEncryptedTestResult, nil
 		}
 		if command == cryptsetupBinary && args[0] == "status" && args[1] == "/dev/mapper/set2-data-0jkntr-block-dmcrypt" {
@@ -2211,6 +2207,21 @@ func TestWipeDevicesFromOtherClusters(t *testing.T) {
 
 	context = &clusterd.Context{
 		Devices: []*sys.LocalDisk{{RealPath: "/dev/vdb"}},
+	}
+	context.Executor = executor
+	err = agent.WipeDevicesFromOtherClusters(context)
+	assert.NoError(t, err)
+
+	// `ceph-volume raw list` returns empty but the expected device still has luks header with cephFSID from another cluster.
+	executor.MockExecuteCommandWithOutput = func(command string, args ...string) (string, error) {
+		logger.Infof("%s %v", command, args)
+		if slices.Contains(args, "raw") && slices.Contains(args, "list") {
+			return `{}`, nil // return empty
+		}
+		return "", errors.Errorf("unknown command %s %s", command, args)
+	}
+	context = &clusterd.Context{
+		Devices: []*sys.LocalDisk{{RealPath: "/dev/vdb", Filesystem: "crypto_LUKS"}},
 	}
 	context.Executor = executor
 	err = agent.WipeDevicesFromOtherClusters(context)

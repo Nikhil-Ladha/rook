@@ -31,6 +31,7 @@ import (
 	apibkt "github.com/kube-object-storage/lib-bucket-provisioner/pkg/provisioner/api"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/object"
+	"github.com/rook/rook/pkg/util/log"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -89,7 +90,8 @@ func (p Provisioner) GenerateUserID(obc *bktv1alpha1.ObjectBucketClaim, ob *bktv
 // Provision creates an s3 bucket and returns a connection info
 // representing the bucket's endpoint and user access credentials.
 func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBucket, error) {
-	logger.Debugf("Provision event for OB options: %+v", options)
+	nsName := p.objectContext.NsName()
+	log.NamedDebug(nsName, logger, "Provision event for OB options: %+v", options)
 
 	additionalConfig, err := additionalConfigSpecFromMap(options.ObjectBucketClaim.Spec.AdditionalConfig)
 	if err != nil {
@@ -102,7 +104,7 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 	if err != nil {
 		return nil, err
 	}
-	logger.Infof("Provision: creating bucket %q for OBC %q", p.bucketName, options.ObjectBucketClaim.Name)
+	log.NamedInfo(nsName, logger, "Provision: creating bucket %q for OBC %q", p.bucketName, options.ObjectBucketClaim.Name)
 
 	p.accessKeyID, p.secretAccessKey, err = bucket.getUserCreds()
 	if err != nil {
@@ -124,20 +126,20 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 	if !bucketExists {
 		// if bucket already exists, this returns error: TooManyBuckets because we set the quota
 		// below. If it already exists, assume we are good to go
-		logger.Debugf("creating bucket %q owned by user %q", p.bucketName, p.cephUserName)
+		log.NamedDebug(nsName, logger, "creating bucket %q owned by user %q", p.bucketName, p.cephUserName)
 		err = p.s3Agent.CreateBucket(p.bucketName)
 		if err != nil {
 			return nil, errors.Wrapf(err, "error creating bucket %q", p.bucketName)
 		}
 	} else if owner != p.cephUserName {
-		logger.Debugf("bucket %q already exists and is owned by user %q instead of user %q, relinking...", p.bucketName, owner, p.cephUserName)
+		log.NamedDebug(nsName, logger, "bucket %q already exists and is owned by user %q instead of user %q, relinking...", p.bucketName, owner, p.cephUserName)
 
 		err = p.adminOpsClient.LinkBucket(p.clusterInfo.Context, admin.BucketLinkInput{Bucket: p.bucketName, UID: p.cephUserName})
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to link bucket %q to user %q", p.bucketName, p.cephUserName)
 		}
 	} else {
-		logger.Debugf("bucket %q already exists", p.bucketName)
+		log.NamedDebug(nsName, logger, "bucket %q already exists", p.bucketName)
 	}
 
 	// is the bucket owner a provisioner generated user?
@@ -148,10 +150,10 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to set user %q bucket quota to %d", p.cephUserName, singleBucketQuota)
 		}
-		logger.Infof("set user %q bucket max to %d", p.cephUserName, singleBucketQuota)
+		log.NamedInfo(nsName, logger, "set user %q bucket max to %d", p.cephUserName, singleBucketQuota)
 	}
 
-	err = p.setAdditionalSettings(additionalConfig)
+	err = p.setAdditionalSettings(bucket)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to set additional settings for OBC %q in NS %q associated with CephObjectStore %q in NS %q", options.ObjectBucketClaim.Name, options.ObjectBucketClaim.Namespace, p.objectStoreName, p.clusterInfo.Namespace)
 	}
@@ -162,7 +164,8 @@ func (p Provisioner) Provision(options *apibkt.BucketOptions) (*bktv1alpha1.Obje
 // Grant attaches to an existing rgw bucket and returns a connection info
 // representing the bucket's endpoint and user access credentials.
 func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBucket, error) {
-	logger.Debugf("Grant event for OB options: %+v", options)
+	nsName := p.objectContext.NsName()
+	log.NamedDebug(nsName, logger, "Grant event for OB options: %+v", options)
 
 	additionalConfig, err := additionalConfigSpecFromMap(options.ObjectBucketClaim.Spec.AdditionalConfig)
 	if err != nil {
@@ -176,10 +179,10 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 	if err != nil {
 		return nil, err
 	}
-	logger.Infof("Grant: allowing access to bucket %q for OBC %q", p.bucketName, options.ObjectBucketClaim.Name)
+	log.NamedInfo(nsName, logger, "Grant: allowing access to bucket %q for OBC %q", p.bucketName, options.ObjectBucketClaim.Name)
 
 	// check and make sure the bucket exists
-	logger.Infof("Checking for existing bucket %q", p.bucketName)
+	log.NamedInfo(nsName, logger, "Checking for existing bucket %q", p.bucketName)
 	if exists, _, err := p.bucketExists(p.bucketName); !exists {
 		return nil, errors.Wrapf(err, "bucket %s does not exist", p.bucketName)
 	}
@@ -205,7 +208,7 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 	}
 
 	// setting quota limit if it is enabled
-	err = p.setAdditionalSettings(additionalConfig)
+	err = p.setAdditionalSettings(bucket)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to set additional settings for OBC %q in NS %q associated with CephObjectStore %q in NS %q", options.ObjectBucketClaim.Name, options.ObjectBucketClaim.Namespace, p.objectStoreName, p.clusterInfo.Namespace)
 	}
@@ -241,7 +244,7 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 	}
 	out, err := p.s3Agent.PutBucketPolicy(p.bucketName, *policy)
 
-	logger.Infof("PutBucketPolicy output: %v", out)
+	log.NamedInfo(nsName, logger, "PutBucketPolicy output: %v", out)
 	if err != nil {
 		return nil, err
 	}
@@ -254,19 +257,20 @@ func (p Provisioner) Grant(options *apibkt.BucketOptions) (*bktv1alpha1.ObjectBu
 // storage class' reclaimPolicy is "Delete". Or, if a Provision() error occurs and
 // the bucket controller needs to clean up before retrying.
 func (p Provisioner) Delete(ob *bktv1alpha1.ObjectBucket) error {
-	logger.Debugf("Delete event for OB: %+v", ob)
+	nsName := p.objectContext.NsName()
+	log.NamedDebug(nsName, logger, "Delete event for OB: %+v", ob)
 
 	err := p.initializeDeleteOrRevoke(ob)
 	if err != nil {
 		return err
 	}
-	logger.Infof("Delete: deleting bucket %q for OB %q", p.bucketName, ob.Name)
+	log.NamedInfo(nsName, logger, "Delete: deleting bucket %q for OB %q", p.bucketName, ob.Name)
 
 	if err := p.deleteBucket(p.bucketName); err != nil {
 		return errors.Wrapf(err, "failed to delete bucket %q", p.bucketName)
 	}
 
-	logger.Infof("Delete: deleting user %q for OB %q", p.bucketName, ob.Name)
+	log.NamedInfo(nsName, logger, "Delete: deleting user %q for OB %q", p.bucketName, ob.Name)
 	if err := p.deleteOBUser(ob); err != nil {
 		return errors.Wrapf(err, "failed to delete user %q", p.cephUserName)
 	}
@@ -276,17 +280,18 @@ func (p Provisioner) Delete(ob *bktv1alpha1.ObjectBucket) error {
 // Revoke removes a user and creds from an existing bucket.
 // Note: cleanup order below matters.
 func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
-	logger.Debugf("Revoke event for OB: %+v", ob)
+	nsName := p.objectContext.NsName()
+	log.NamedDebug(nsName, logger, "Revoke event for OB: %+v", ob)
 
 	err := p.initializeDeleteOrRevoke(ob)
 	if err != nil {
 		return err
 	}
-	logger.Infof("Revoke: denying access to bucket %q for OB %q", p.bucketName, ob.Name)
+	log.NamedInfo(nsName, logger, "Revoke: denying access to bucket %q for OB %q", p.bucketName, ob.Name)
 
 	bucket, err := p.adminOpsClient.GetBucketInfo(p.clusterInfo.Context, admin.Bucket{Bucket: p.bucketName})
 	if err != nil {
-		logger.Errorf("%v", err)
+		log.NamedError(nsName, logger, "%v", err)
 	} else {
 		if bucket.Owner == "" {
 			return errors.Errorf("failed to find bucket %q owner", p.bucketName)
@@ -317,10 +322,10 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NoSuchBucketPolicy" {
 				policy = nil
-				logger.Errorf("no bucket policy for bucket %q, so no need to drop policy", p.bucketName)
+				log.NamedError(nsName, logger, "no bucket policy for bucket %q, so no need to drop policy", p.bucketName)
 
 			} else {
-				logger.Errorf("error getting policy for bucket %q. %v", p.bucketName, err)
+				log.NamedError(nsName, logger, "error getting policy for bucket %q. %v", p.bucketName, err)
 				return err
 			}
 		}
@@ -339,7 +344,7 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 				policy = policy.ModifyBucketPolicy(*statement)
 			}
 			out, err := p.s3Agent.PutBucketPolicy(p.bucketName, *policy)
-			logger.Infof("PutBucketPolicy output: %v", out)
+			log.NamedInfo(nsName, logger, "PutBucketPolicy output: %v", out)
 			if err != nil {
 				return errors.Wrap(err, "failed to update policy")
 			} else {
@@ -354,7 +359,7 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 			if err != nil {
 				return err
 			}
-			logger.Infof("principal %q ejected from bucket %q policy", p.cephUserName, p.bucketName)
+			log.NamedInfo(nsName, logger, "principal %q ejected from bucket %q policy", p.cephUserName, p.bucketName)
 		}
 	}
 
@@ -371,14 +376,15 @@ func (p Provisioner) Revoke(ob *bktv1alpha1.ObjectBucket) error {
 // initializeCreateOrGrant sets common provisioner receiver fields and
 // the services and sessions needed to provision.
 func (p *Provisioner) initializeCreateOrGrant(bucket *bucket) error {
-	logger.Info("initializing and setting CreateOrGrant services")
+	nsName := p.objectContext.NsName()
+	log.NamedInfo(nsName, logger, "initializing and setting CreateOrGrant services")
 
 	// set the bucket name
 	obc := bucket.options.ObjectBucketClaim
 	scName := bucket.options.ObjectBucketClaim.Spec.StorageClassName
 	sc, err := p.context.Clientset.StorageV1().StorageClasses().Get(p.clusterInfo.Context, scName, metav1.GetOptions{})
 	if err != nil {
-		logger.Errorf("failed to get storage class for OBC %q in namespace %q. %v", obc.Name, obc.Namespace, err)
+		log.NamedError(nsName, logger, "failed to get storage class for OBC %q in namespace %q. %v", obc.Name, obc.Namespace, err)
 		return err
 	}
 
@@ -430,7 +436,7 @@ func (p *Provisioner) initializeCreateOrGrant(bucket *bucket) error {
 	} else {
 		p.cephUserName = bucket.options.UserID
 	}
-	logger.Debugf("Using user %q for OBC %q", p.cephUserName, obc.Name)
+	log.NamedDebug(nsName, logger, "Using user %q for OBC %q", p.cephUserName, obc.Name)
 
 	return nil
 }
@@ -609,23 +615,23 @@ func (p *Provisioner) populateDomainAndPort(sc *storagev1.StorageClass) error {
 }
 
 // Check for additional options mentioned in OBC and set them accordingly
-func (p *Provisioner) setAdditionalSettings(additionalConfig *additionalConfigSpec) error {
-	err := p.setUserQuota(additionalConfig)
+func (p *Provisioner) setAdditionalSettings(bucket *bucket) error {
+	err := p.setUserQuota(bucket)
 	if err != nil {
 		return errors.Wrap(err, "failed to set user quota")
 	}
 
-	err = p.setBucketQuota(additionalConfig)
+	err = p.setBucketQuota(bucket)
 	if err != nil {
 		return errors.Wrap(err, "failed to set bucket quota")
 	}
 
-	err = p.setBucketPolicy(additionalConfig)
+	err = p.setBucketPolicy(bucket)
 	if err != nil {
 		return errors.Wrap(err, "failed to set bucket policy")
 	}
 
-	err = p.setBucketLifecycle(additionalConfig)
+	err = p.setBucketLifecycle(bucket)
 	if err != nil {
 		return errors.Wrap(err, "failed to set bucket lifecycle")
 	}
@@ -633,7 +639,16 @@ func (p *Provisioner) setAdditionalSettings(additionalConfig *additionalConfigSp
 	return nil
 }
 
-func (p *Provisioner) setUserQuota(additionalConfig *additionalConfigSpec) error {
+func (p *Provisioner) setUserQuota(bucket *bucket) error {
+	nsName := p.objectContext.NsName()
+	additionalConfig := bucket.additionalConfig
+
+	if additionalConfig.bucketOwner != nil {
+		// when an explicit bucket owner is set, we do not manage user quotas
+		log.NamedDebug(nsName, logger, "Skipping user level quotas for OBC %q as bucketOwner is set", bucket.options.ObjectBucketClaim.Name)
+		return nil
+	}
+
 	liveQuota, err := p.adminOpsClient.GetUserQuota(p.clusterInfo.Context, admin.QuotaSpec{UID: p.cephUserName})
 	if err != nil {
 		return errors.Wrapf(err, "failed to fetch user %q", p.cephUserName)
@@ -672,7 +687,7 @@ func (p *Provisioner) setUserQuota(additionalConfig *additionalConfigSpec) error
 
 	diff := cmp.Diff(currentQuota, targetQuota)
 	if diff != "" {
-		logger.Debugf("Quota for user %q has changed. diff:%s", p.cephUserName, diff)
+		log.NamedDebug(nsName, logger, "Quota for user %q has changed. diff:%s", p.cephUserName, diff)
 		// UID is not set in the QuotaSpec returned by GetUser()/GetUserQuota()
 		targetQuota.UID = p.cephUserName
 		err = p.adminOpsClient.SetUserQuota(p.clusterInfo.Context, targetQuota)
@@ -684,12 +699,15 @@ func (p *Provisioner) setUserQuota(additionalConfig *additionalConfigSpec) error
 	return nil
 }
 
-func (p *Provisioner) setBucketQuota(additionalConfig *additionalConfigSpec) error {
-	bucket, err := p.adminOpsClient.GetBucketInfo(p.clusterInfo.Context, admin.Bucket{Bucket: p.bucketName})
+func (p *Provisioner) setBucketQuota(bucket *bucket) error {
+	additionalConfig := bucket.additionalConfig
+	nsName := p.objectContext.NsName()
+
+	bkt, err := p.adminOpsClient.GetBucketInfo(p.clusterInfo.Context, admin.Bucket{Bucket: p.bucketName})
 	if err != nil {
 		return errors.Wrapf(err, "failed to fetch bucket %q", p.bucketName)
 	}
-	liveQuota := bucket.BucketQuota
+	liveQuota := bkt.BucketQuota
 
 	// Copy only the fields that are actively managed by the provisioner to
 	// prevent passing back undesirable combinations of fields.  It is
@@ -724,7 +742,7 @@ func (p *Provisioner) setBucketQuota(additionalConfig *additionalConfigSpec) err
 
 	diff := cmp.Diff(currentQuota, targetQuota)
 	if diff != "" {
-		logger.Debugf("Quota for bucket %q has changed. diff:%s", p.bucketName, diff)
+		log.NamedDebug(nsName, logger, "Quota for bucket %q has changed. diff:%s", p.bucketName, diff)
 		// UID & Bucket are not set in the QuotaSpec returned by GetBucketInfo()
 		targetQuota.UID = p.cephUserName
 		targetQuota.Bucket = p.bucketName
@@ -737,7 +755,10 @@ func (p *Provisioner) setBucketQuota(additionalConfig *additionalConfigSpec) err
 	return nil
 }
 
-func (p *Provisioner) setBucketPolicy(additionalConfig *additionalConfigSpec) error {
+func (p *Provisioner) setBucketPolicy(bucket *bucket) error {
+	nsName := p.objectContext.NsName()
+	additionalConfig := bucket.additionalConfig
+
 	svc := p.s3Agent.Client
 	var livePolicy *string
 
@@ -761,7 +782,7 @@ func (p *Provisioner) setBucketPolicy(additionalConfig *additionalConfigSpec) er
 		return nil
 	}
 
-	logger.Debugf("Policy for bucket %q has changed. diff:%s", p.bucketName, diff)
+	log.NamedDebug(nsName, logger, "Policy for bucket %q has changed. diff:%s", p.bucketName, diff)
 	if additionalConfig.bucketPolicy == nil {
 		// if policy is out of sync and the new policy is nil, we should delete the live policy
 		_, err = svc.DeleteBucketPolicy(&s3.DeleteBucketPolicyInput{
@@ -784,7 +805,10 @@ func (p *Provisioner) setBucketPolicy(additionalConfig *additionalConfigSpec) er
 	return nil
 }
 
-func (p *Provisioner) setBucketLifecycle(additionalConfig *additionalConfigSpec) error {
+func (p *Provisioner) setBucketLifecycle(bucket *bucket) error {
+	nsName := p.objectContext.NsName()
+	additionalConfig := bucket.additionalConfig
+
 	svc := p.s3Agent.Client
 	var liveLc *s3.GetBucketLifecycleConfigurationOutput
 
@@ -795,7 +819,7 @@ func (p *Provisioner) setBucketLifecycle(additionalConfig *additionalConfigSpec)
 		// when no lifecycle configuration is set, an err with a "code" of
 		// NoSuchLifecycleConfiguration is returned
 		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NoSuchLifecycleConfiguration" {
-			logger.Debugf("no lifecycle configuration set for bucket %q", p.bucketName)
+			log.NamedDebug(nsName, logger, "no lifecycle configuration set for bucket %q", p.bucketName)
 		} else {
 			return errors.Wrapf(err, "failed to fetch lifecycle configuration for bucket %q", p.bucketName)
 		}
@@ -832,7 +856,7 @@ func (p *Provisioner) setBucketLifecycle(additionalConfig *additionalConfigSpec)
 		return nil
 	}
 
-	logger.Debugf("Lifecycle configuration for bucket %q has changed. diff:%s", p.bucketName, diff)
+	log.NamedDebug(nsName, logger, "Lifecycle configuration for bucket %q has changed. diff:%s", p.bucketName, diff)
 	if additionalConfig.bucketLifecycle == nil {
 		// if policy is out of sync and the new policy is nil, delete the live policy
 		_, err = svc.DeleteBucketLifecycle(&s3.DeleteBucketLifecycleInput{

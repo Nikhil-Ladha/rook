@@ -35,6 +35,7 @@ import (
 	cephconfig "github.com/rook/rook/pkg/operator/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -131,6 +132,13 @@ type rgwProbeConfig struct {
 	Protocol ProtocolType
 	Port     string
 	Path     string
+}
+
+// supportsCurlCaBundle returns true if the Ceph version supports CURL_CA_BUNDLE
+// environment variable for CA bundle handling (Tentacle v20.0.0+).
+// TODO: Remove this helper after Ceph Squid is no longer supported
+func supportsCurlCaBundle(c *clusterConfig) bool {
+	return c.clusterInfo.CephVersion.IsAtLeastTentacle()
 }
 
 func (c *clusterConfig) createDeployment(rgwConfig *rgwConfig) (*apps.Deployment, error) {
@@ -243,15 +251,22 @@ func (c *clusterConfig) makeRGWPodSpec(rgwConfig *rgwConfig) (v1.PodTemplateSpec
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, customCaBundleVol)
-		updatedCaBundleVol := v1.Volume{
-			Name: caBundleUpdatedVolumeName,
-			VolumeSource: v1.VolumeSource{
-				EmptyDir: &v1.EmptyDirVolumeSource{},
-			},
+		// Determine CA bundle handling method based on Ceph version
+		// Newer Ceph versions support CURL_CA_BUNDLE env var (see PR
+		// https://github.com/ceph/ceph/pull/44283)
+		// Older versions require system CA trust update via init container
+		// TODO: Remove this logic after Ceph Squid is no longer supported
+		if !supportsCurlCaBundle(c) {
+			updatedCaBundleVol := v1.Volume{
+				Name: caBundleUpdatedVolumeName,
+				VolumeSource: v1.VolumeSource{
+					EmptyDir: &v1.EmptyDirVolumeSource{},
+				},
+			}
+			podSpec.Volumes = append(podSpec.Volumes, updatedCaBundleVol)
+			podSpec.InitContainers = append(podSpec.InitContainers,
+				c.createCaBundleUpdateInitContainer(rgwConfig))
 		}
-		podSpec.Volumes = append(podSpec.Volumes, updatedCaBundleVol)
-		podSpec.InitContainers = append(podSpec.InitContainers,
-			c.createCaBundleUpdateInitContainer(rgwConfig))
 	}
 	kmsEnabled, err := c.CheckRGWKMS()
 	if err != nil {
@@ -386,6 +401,8 @@ func (c *clusterConfig) makeChownInitContainer(rgwConfig *rgwConfig) v1.Containe
 }
 
 func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) (v1.Container, error) {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
+
 	// start the rgw daemon in the foreground
 	startupProbe, err := c.defaultStartupProbe()
 	if err != nil {
@@ -436,16 +453,32 @@ func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) (v1.Container,
 		container.VolumeMounts = append(container.VolumeMounts, mount)
 	}
 	if c.store.Spec.Gateway.CaBundleRef != "" {
-		updatedBundleMount := v1.VolumeMount{Name: caBundleUpdatedVolumeName, MountPath: caBundleExtractedDir, ReadOnly: true}
-		container.VolumeMounts = append(container.VolumeMounts, updatedBundleMount)
+		// Use same CA bundle handling method as determined in makeRGWPodSpec
+		if supportsCurlCaBundle(c) {
+			customCaBundleMount := v1.VolumeMount{Name: caBundleVolumeName, MountPath: caBundleMountPath, ReadOnly: true}
+			container.VolumeMounts = append(container.VolumeMounts, customCaBundleMount)
+			container.Env = append(container.Env,
+				v1.EnvVar{
+					// Following PR introduced to specify ssl certificate for RGW
+					// admin operations with this CURL_CA_BUNDLE env variable.
+					// https://github.com/ceph/ceph/pull/44283
+					Name:  "CURL_CA_BUNDLE",
+					Value: path.Join(caBundleMountPath, caBundleFileName),
+				},
+			)
+		} else {
+			// TODO: Remove this logic after Ceph Squid is no longer supported
+			updatedBundleMount := v1.VolumeMount{Name: caBundleUpdatedVolumeName, MountPath: caBundleExtractedDir, ReadOnly: true}
+			container.VolumeMounts = append(container.VolumeMounts, updatedBundleMount)
+		}
 	}
 	kmsEnabled, err := c.CheckRGWKMS()
 	if err != nil {
-		logger.Errorf("failed to enable SSE-KMS. %v", err)
+		log.NamedError(nsName, logger, "failed to enable SSE-KMS. %v", err)
 		return v1.Container{}, err
 	}
 	if kmsEnabled {
-		logger.Debugf("enabliing SSE-KMS. %v", c.store.Spec.Security.KeyManagementService)
+		log.NamedDebug(nsName, logger, "enabliing SSE-KMS. %v", c.store.Spec.Security.KeyManagementService)
 		container.Args = append(container.Args, c.sseKMSDefaultOptions(kmsEnabled)...)
 		if c.store.Spec.Security.KeyManagementService.IsTokenAuthEnabled() {
 			container.Args = append(container.Args, c.sseKMSVaultTokenOptions(kmsEnabled)...)
@@ -488,7 +521,7 @@ func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) (v1.Container,
 		return v1.Container{}, err
 	}
 	if s3EncryptionEnabled {
-		logger.Debugf("enabliing SSE-S3. %v", c.store.Spec.Security.ServerSideEncryptionS3)
+		log.NamedDebug(nsName, logger, "enabliing SSE-S3. %v", c.store.Spec.Security.ServerSideEncryptionS3)
 
 		container.Args = append(container.Args, c.sseS3DefaultOptions(s3EncryptionEnabled)...)
 		if c.store.Spec.Security.ServerSideEncryptionS3.IsTokenAuthEnabled() {
@@ -523,7 +556,7 @@ func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) (v1.Container,
 				isCrushLocationSet = true
 			}
 		} else {
-			logger.Warning("can't set RGW read affinity for ceph version below v20 (tentacle)")
+			log.NamedWarning(nsName, logger, "can't set RGW read affinity for ceph version below v20 (tentacle)")
 		}
 	}
 
@@ -566,9 +599,10 @@ func noLivenessProbe() *v1.Probe {
 }
 
 func (c *clusterConfig) defaultReadinessProbe() (*v1.Probe, error) {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
 	probePath, disableProbe := getRGWProbePath(c.store.Spec.Protocols)
 	if disableProbe {
-		logger.Infof("disabling startup probe for %q store", c.store.Name)
+		log.NamedInfo(nsName, logger, "disabling startup probe for %q store", c.store.Name)
 		return nil, nil
 	}
 	proto, port := c.endpointInfo()
@@ -635,9 +669,11 @@ func getRGWProbePath(protocolSpec cephv1.ProtocolSpec) (path string, disable boo
 }
 
 func (c *clusterConfig) defaultStartupProbe() (*v1.Probe, error) {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
+
 	probePath, disableProbe := getRGWProbePath(c.store.Spec.Protocols)
 	if disableProbe {
-		logger.Infof("disabling startup probe for %q store", c.store.Name)
+		log.NamedInfo(nsName, logger, "disabling startup probe for %q store", c.store.Name)
 		return nil, nil
 	}
 	proto, port := c.endpointInfo()
@@ -673,6 +709,8 @@ func (c *clusterConfig) defaultStartupProbe() (*v1.Probe, error) {
 }
 
 func (c *clusterConfig) endpointInfo() (ProtocolType, *intstr.IntOrString) {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
+
 	// The port the liveness probe needs to probe
 	// Assume we run on SDN by default
 	proto := HTTPProtocol
@@ -689,7 +727,7 @@ func (c *clusterConfig) endpointInfo() (ProtocolType, *intstr.IntOrString) {
 		port = intstr.FromInt(int(c.store.Spec.Gateway.SecurePort))
 	}
 
-	logger.Debugf("rgw %q probe port is %v", c.store.Namespace+"/"+c.store.Name, port)
+	log.NamedDebug(nsName, logger, "rgw %q probe port is %v", c.store.Namespace+"/"+c.store.Name, port)
 	return proto, &port
 }
 
@@ -727,7 +765,7 @@ func (c *clusterConfig) generateService(cephObjectStore *cephv1.CephObjectStore)
 	return svc
 }
 
-func (c *clusterConfig) generateEndpoint(cephObjectStore *cephv1.CephObjectStore) *discoveryv1.EndpointSlice {
+func (c *clusterConfig) generateEndpoint(cephObjectStore *cephv1.CephObjectStore) (*discoveryv1.EndpointSlice, error) {
 	labels := getLabels(cephObjectStore.Name, cephObjectStore.Namespace, true)
 
 	// Convert to string addresses
@@ -736,13 +774,18 @@ func (c *clusterConfig) generateEndpoint(cephObjectStore *cephv1.CephObjectStore
 		k8sEndpointAddrs = append(k8sEndpointAddrs, rookEndpoint.IP)
 	}
 
+	addressType, err := k8sutil.GetIpAddressType(k8sEndpointAddrs)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get the addressType")
+	}
+
 	endpoints := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instanceName(cephObjectStore.Name),
 			Namespace: cephObjectStore.Namespace,
 			Labels:    labels,
 		},
-		AddressType: discoveryv1.AddressTypeIPv4,
+		AddressType: addressType,
 		Endpoints: []discoveryv1.Endpoint{
 			{
 				Addresses: k8sEndpointAddrs,
@@ -757,15 +800,19 @@ func (c *clusterConfig) generateEndpoint(cephObjectStore *cephv1.CephObjectStore
 	addPortToEndpoint(endpoints, "http", cephObjectStore.Spec.Gateway.Port)
 	addPortToEndpoint(endpoints, "https", cephObjectStore.Spec.Gateway.SecurePort)
 
-	return endpoints
+	return endpoints, nil
 }
 
 func (c *clusterConfig) reconcileExternalEndpoint(cephObjectStore *cephv1.CephObjectStore) error {
-	logger.Info("reconciling external object store service")
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
+	log.NamedInfo(nsName, logger, "reconciling external object store service")
 
-	endpoint := c.generateEndpoint(cephObjectStore)
+	endpoint, err := c.generateEndpoint(cephObjectStore)
+	if err != nil {
+		return errors.Wrapf(err, "failed to generate the endpoint %q", endpoint.Name)
+	}
 	// Set owner ref to the parent object
-	err := c.ownerInfo.SetControllerReference(endpoint)
+	err = c.ownerInfo.SetControllerReference(endpoint)
 	if err != nil {
 		return errors.Wrapf(err, "failed to set owner reference to ceph object store endpoint %q", endpoint.Name)
 	}
@@ -779,6 +826,7 @@ func (c *clusterConfig) reconcileExternalEndpoint(cephObjectStore *cephv1.CephOb
 }
 
 func (c *clusterConfig) reconcileService(store *cephv1.CephObjectStore) error {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
 	service := c.generateService(store)
 	// Set owner ref to the parent object
 	err := c.ownerInfo.SetControllerReference(service)
@@ -791,7 +839,7 @@ func (c *clusterConfig) reconcileService(store *cephv1.CephObjectStore) error {
 		return errors.Wrapf(err, "failed to create or update object store %q service", store.Name)
 	}
 
-	logger.Infof("ceph object store gateway service running at %s", svc.Spec.ClusterIP)
+	log.NamedInfo(nsName, logger, "ceph object store gateway service running at %s", svc.Spec.ClusterIP)
 
 	return nil
 }
@@ -811,6 +859,8 @@ func (c *clusterConfig) vaultPrefixRGW() string {
 }
 
 func (c *clusterConfig) CheckRGWKMS() (bool, error) {
+	nsName := controller.NsName(c.store.Namespace, c.store.Name)
+
 	if c.store.Spec.Security != nil && c.store.Spec.Security.KeyManagementService.IsEnabled() {
 		err := kms.ValidateConnectionDetails(c.clusterInfo.Context, c.context, &c.store.Spec.Security.KeyManagementService, c.store.Namespace)
 		if err != nil {
@@ -828,7 +878,7 @@ func (c *clusterConfig) CheckRGWKMS() (bool, error) {
 				}
 			} else {
 				// If VAUL_BACKEND is not specified let's assume it's v2
-				logger.Warningf("%s is not set, assuming the only supported version 2", vault.VaultBackendKey)
+				log.NamedWarning(nsName, logger, "%s is not set, assuming the only supported version 2", vault.VaultBackendKey)
 				c.store.Spec.Security.KeyManagementService.ConnectionDetails[vault.VaultBackendKey] = "v2"
 			}
 			return true, nil
@@ -931,9 +981,8 @@ func (c *clusterConfig) generateVolumeSourceWithTLSSecret() (*v1.SecretVolumeSou
 }
 
 func (c *clusterConfig) generateVolumeSourceWithCaBundleSecret() (*v1.SecretVolumeSource, error) {
-	// Keep the ca-bundle as secure as possible in the container. Give only user read perms.
-	// Same as above for generateVolumeSourceWithTLSSecret function.
-	userReadOnly := int32(0o400)
+	// RGW runs as 'ceph' user and needs access to the CA bundle.
+	readOnly := int32(0o444)
 	caBundleVolSrc := &v1.SecretVolumeSource{
 		SecretName: c.store.Spec.Gateway.CaBundleRef,
 	}
@@ -945,7 +994,7 @@ func (c *clusterConfig) generateVolumeSourceWithCaBundleSecret() (*v1.SecretVolu
 		return nil, errors.New("CaBundle secret should be 'Opaque' type")
 	}
 	caBundleVolSrc.Items = []v1.KeyToPath{
-		{Key: caBundleKeyName, Path: caBundleFileName, Mode: &userReadOnly},
+		{Key: caBundleKeyName, Path: caBundleFileName, Mode: &readOnly},
 	}
 	return caBundleVolSrc, nil
 }
@@ -1066,11 +1115,13 @@ func (c *clusterConfig) sseS3VaultTLSOptions(setOptions bool) []string {
 // Otherwise set rgw config parameter to mon database in ./config.go -> setFlagsMonConfigStore()
 // CLI flags override values from mon db: see ceph config docs: https://docs.ceph.com/en/latest/rados/configuration/ceph-conf/#config-sources
 func buildRGWConfigFlags(objectStore *cephv1.CephObjectStore) []string {
+	nsName := controller.NsName(objectStore.Namespace, objectStore.Name)
+
 	var res []string
 	// todo: move all flags here
 	if enableAPIs := buildRGWEnableAPIsConfigVal(objectStore.Spec.Protocols); len(enableAPIs) != 0 {
 		res = append(res, cephconfig.NewFlag("rgw_enable_apis", strings.Join(enableAPIs, ",")))
-		logger.Debugf("Enabling APIs for RGW instance %q: %s", objectStore.Name, enableAPIs)
+		log.NamedDebug(nsName, logger, "Enabling APIs for RGW instance %q: %s", objectStore.Name, enableAPIs)
 	}
 	return res
 }
@@ -1121,9 +1172,6 @@ func (c *clusterConfig) addDNSNamesToRGWServer() (string, error) {
 	}
 	if !c.store.AdvertiseEndpointIsSet() && len(c.store.Spec.Hosting.DNSNames) == 0 {
 		return "", nil
-	}
-	if !c.clusterInfo.CephVersion.IsAtLeastReef() {
-		return "", errors.New("rgw dns names are supported from ceph v18 onwards")
 	}
 
 	dnsNames := []string{}

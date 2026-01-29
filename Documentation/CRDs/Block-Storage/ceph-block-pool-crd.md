@@ -70,6 +70,10 @@ spec:
     dataChunks: 4
     codingChunks: 2
   deviceClass: hdd
+  parameters:
+    # Ceph Tentacle v20 has optimizations that need to be explicitly enabled.
+    # Remove this setting for pre-Tentacle pools.
+    allow_ec_optimizations: "true"
 ```
 
 Various combinations of `dataChunks` and `codingChunks` values are possible, with
@@ -238,7 +242,7 @@ flags are present on RBD volumes.
 * `application`: The type of application set on the pool. By default, Ceph pools for CephBlockPools will be `rbd`,
     CephObjectStore pools will be `rgw`, and CephFilesystem pools will be `cephfs`.
 
-* `parameters`: Sets any [parameters](https://docs.ceph.com/docs/master/rados/operations/pools/#set-pool-values) listed to the given pool
+* `parameters`: Sets any [parameters](https://docs.ceph.com/docs/master/rados/operations/pools/#setting-pool-values) listed to the given pool
     * `target_size_ratio:` gives a hint (%) to the Ceph PG autoscaler in terms of expected consumption of the total cluster capacity of a given pool, for more info see the [ceph documentation](https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size)
     * `compression_mode`: Configures data compression at the OSD level. If left unspecified, no compression is performed. Values supported are [these](https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#inline-compression):  `none`, `passive`, `aggressive`, and `force`.  In most cases `aggressive` is appropriate.  Specify `force` only if you really know what you're doing.
 
@@ -256,7 +260,7 @@ flags are present on RBD volumes.
         * `disabled`: whether to enable or disable pool mirroring status
         * `interval`: time interval to refresh the mirroring status (default 60s)
 
-* `quotas`: Set byte and object quotas. See the [ceph documentation](https://docs.ceph.com/en/latest/rados/operations/pools/#set-pool-quotas) for more info.
+* `quotas`: Set byte and object quotas. See the [ceph documentation](https://docs.ceph.com/en/latest/rados/operations/pools/#setting-pool-quotas) for more info.
     * `maxSize`: quota in bytes as a string with quantity suffixes (e.g. "10Gi")
     * `maxObjects`: quota in objects as an integer
 
@@ -318,3 +322,9 @@ The `failureDomain` must be also be taken into account when determining the numb
 If you do not have a sufficient number of hosts or OSDs for unique placement the pool can be created, writing to the pool will hang and Ceph will report `undersized` or `incomplete` placement groups.
 
 Rook currently only configures two levels in the CRUSH map. It is also possible to configure other levels such as `rack` with by adding [topology labels](../Cluster/ceph-cluster-crd.md#osd-topology) to the nodes.
+
+!!! tip
+    Ceph Tentacle v20 has optimizations that need to be explicitly enabled.
+    Set the following parameter in the pool spec of erasure coded pools:
+    parameters:
+        allow_ec_optimizations: "true"

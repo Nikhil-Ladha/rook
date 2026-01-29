@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -240,9 +241,9 @@ func TestNetworkBindingFlags(t *testing.T) {
 		args args
 		want []string
 	}{
-		{"ipv4", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Reef}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
-		{"ipv6", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Reef}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
-		{"dualstack-supported", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Reef}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv4FlagTrue, ipv6FlagTrue}},
+		{"ipv4", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Squid}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv4}}}, []string{ipv4FlagTrue, ipv6FlagFalse}},
+		{"ipv6", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Squid}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6}}}, []string{ipv4FlagFalse, ipv6FlagTrue}},
+		{"dualstack-supported", args{cluster: &cephclient.ClusterInfo{CephVersion: version.Squid}, spec: &cephv1.ClusterSpec{Network: cephv1.NetworkSpec{IPFamily: cephv1.IPv6, DualStack: true}}}, []string{ipv4FlagTrue, ipv6FlagTrue}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -259,6 +260,22 @@ func TestExtractMgrIP(t *testing.T) {
 	activeMgrRaw := "172.17.0.12:6801/2535462469"
 	ip := extractMgrIP(activeMgrRaw)
 	assert.Equal(t, "172.17.0.12", ip)
+
+	activeMgrRaw = "[2001:db8::1]:6801/2535462469"
+	ip = extractMgrIP(activeMgrRaw)
+	assert.Equal(t, "2001:db8::1", ip)
+
+	activeMgrRaw = "invalid-address"
+	ip = extractMgrIP(activeMgrRaw)
+	assert.Equal(t, activeMgrRaw, ip)
+
+	activeMgrRaw = ""
+	ip = extractMgrIP(activeMgrRaw)
+	assert.Equal(t, "", ip)
+
+	activeMgrRaw = "172.17.0.12"
+	ip = extractMgrIP(activeMgrRaw)
+	assert.Equal(t, activeMgrRaw, ip)
 }
 
 func TestConfigureExternalMetricsEndpoint(t *testing.T) {
@@ -351,6 +368,9 @@ func TestConfigureExternalMetricsEndpoint(t *testing.T) {
 		currentEndpoints, err := ctx.Clientset.DiscoveryV1().EndpointSlices(namespace).Get(context.TODO(), "rook-ceph-mgr-external", metav1.GetOptions{})
 		assert.NoError(t, err)
 		assert.Equal(t, "172.17.0.12", currentEndpoints.Endpoints[0].Addresses[0], currentEndpoints)
+		assert.Equal(t, currentEndpoints.Labels[discoveryv1.LabelServiceName], ExternalMgrAppName)
+		assert.Equal(t, currentEndpoints.Labels[k8sutil.AppAttr], "rook-ceph-mgr")
+		assert.Equal(t, currentEndpoints.Labels[k8sutil.ClusterAttr], namespace)
 	})
 
 	t.Run("spec and current active mgr endpoint identical with existing endpoint object", func(t *testing.T) {

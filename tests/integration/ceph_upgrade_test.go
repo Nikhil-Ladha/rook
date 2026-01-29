@@ -98,15 +98,15 @@ func (s *UpgradeSuite) baseSetup(useHelm bool, initialRookVersion string, initia
 }
 
 func (s *UpgradeSuite) TestUpgradeRook() {
-	s.testUpgrade(false, installer.ReefVersion)
+	s.testUpgrade(false, installer.SquidVersion)
 }
 
 func (s *UpgradeSuite) TestUpgradeHelm() {
-	s.testUpgrade(true, installer.ReefVersion)
+	s.testUpgrade(true, installer.SquidVersion)
 }
 
 func (s *UpgradeSuite) testUpgrade(useHelm bool, initialCephVersion v1.CephVersionSpec) {
-	baseRookImage := installer.Version1_17
+	baseRookImage := installer.Version1_18
 	s.baseSetup(useHelm, baseRookImage, initialCephVersion)
 
 	objectUserID := "upgraded-user"
@@ -160,49 +160,15 @@ func (s *UpgradeSuite) testUpgrade(useHelm bool, initialCephVersion v1.CephVersi
 	}
 
 	//
-	// Upgrade from reef to squid
+	// Upgrade from squid to tentacle
 	//
-	logger.Infof("*** UPGRADING CEPH FROM REEF TO SQUID ***")
-	s.gatherLogs(s.settings.OperatorNamespace, "_before_squid_upgrade")
-	s.upgradeCephVersion(installer.SquidVersion.Image, numOSDs)
+	logger.Infof("*** UPGRADING CEPH FROM SQUID TO TENTACLE ***")
+	s.gatherLogs(s.settings.OperatorNamespace, "_before_tentacle_upgrade")
+	s.upgradeCephVersion(installer.TentacleVersion.Image, numOSDs)
 	// Verify reading and writing to the test clients
-	newFile = "post-squid-upgrade-file"
+	newFile = "post-tentacle-upgrade-file"
 	s.verifyFilesAfterUpgrade(newFile, rbdFilesToRead, cephfsFilesToRead)
-	logger.Infof("Verified upgrade from reef to squid")
-
-	checkCephObjectUser(&s.Suite, s.helper, s.k8sh, s.namespace, installer.ObjectStoreName, objectUserID, false)
-}
-
-func (s *UpgradeSuite) TestUpgradeCephToReefDevel() {
-	baseRookImage := installer.LocalBuildTag
-	s.baseSetup(false, baseRookImage, installer.ReefVersion)
-
-	objectUserID := "upgraded-user"
-	preFilename := "pre-upgrade-file"
-	s.settings.CephVersion = installer.ReefVersion
-	numOSDs, rbdFilesToRead, cephfsFilesToRead := s.deployClusterforUpgrade(baseRookImage, objectUserID, preFilename)
-	clusterInfo := client.AdminTestClusterInfo(s.namespace)
-	requireBlockImagesRemoved := false
-	defer func() {
-		blockTestDataCleanUp(s.helper, s.k8sh, &s.Suite, clusterInfo, installer.BlockPoolName, installer.BlockPoolSCName, blockName, rbdPodName, requireBlockImagesRemoved)
-		cleanupFilesystemConsumer(s.helper, s.k8sh, &s.Suite, s.namespace, filePodName)
-		cleanupFilesystem(s.helper, s.k8sh, &s.Suite, s.namespace, installer.FilesystemName)
-		_ = s.helper.ObjectUserClient.Delete(s.namespace, objectUserID)
-		_ = s.helper.BucketClient.DeleteObc(obcName, installer.ObjectStoreSCName, bucketPrefix, maxObject, false)
-		_ = s.helper.BucketClient.DeleteBucketStorageClass(s.namespace, installer.ObjectStoreName, installer.ObjectStoreSCName, "Delete")
-		objectStoreCleanUp(&s.Suite, s.helper, s.k8sh, s.settings.Namespace, installer.ObjectStoreName)
-	}()
-
-	//
-	// Upgrade from reef to reef devel
-	//
-	logger.Infof("*** UPGRADING CEPH FROM REEF STABLE TO REEF DEVEL ***")
-	s.gatherLogs(s.settings.OperatorNamespace, "_before_reef_upgrade")
-	s.upgradeCephVersion(installer.ReefDevelVersion.Image, numOSDs)
-	// Verify reading and writing to the test clients
-	newFile := "post-reef-upgrade-file"
-	s.verifyFilesAfterUpgrade(newFile, rbdFilesToRead, cephfsFilesToRead)
-	logger.Infof("verified upgrade from reef stable to reef devel")
+	logger.Infof("Verified upgrade from squid to tentacle")
 
 	checkCephObjectUser(&s.Suite, s.helper, s.k8sh, s.namespace, installer.ObjectStoreName, objectUserID, false)
 }
@@ -237,6 +203,40 @@ func (s *UpgradeSuite) TestUpgradeCephToSquidDevel() {
 	newFile := "post-squid-upgrade-file"
 	s.verifyFilesAfterUpgrade(newFile, rbdFilesToRead, cephfsFilesToRead)
 	logger.Infof("verified upgrade from squid stable to squid devel")
+
+	checkCephObjectUser(&s.Suite, s.helper, s.k8sh, s.namespace, installer.ObjectStoreName, objectUserID, false)
+}
+
+func (s *UpgradeSuite) TestUpgradeCephToTentacleDevel() {
+	baseRookImage := installer.LocalBuildTag
+	s.baseSetup(false, baseRookImage, installer.TentacleVersion)
+
+	objectUserID := "upgraded-user"
+	preFilename := "pre-upgrade-file"
+	s.settings.CephVersion = installer.TentacleVersion
+	numOSDs, rbdFilesToRead, cephfsFilesToRead := s.deployClusterforUpgrade(baseRookImage, objectUserID, preFilename)
+	clusterInfo := client.AdminTestClusterInfo(s.namespace)
+	requireBlockImagesRemoved := false
+	defer func() {
+		blockTestDataCleanUp(s.helper, s.k8sh, &s.Suite, clusterInfo, installer.BlockPoolName, installer.BlockPoolSCName, blockName, rbdPodName, requireBlockImagesRemoved)
+		cleanupFilesystemConsumer(s.helper, s.k8sh, &s.Suite, s.namespace, filePodName)
+		cleanupFilesystem(s.helper, s.k8sh, &s.Suite, s.namespace, installer.FilesystemName)
+		_ = s.helper.ObjectUserClient.Delete(s.namespace, objectUserID)
+		_ = s.helper.BucketClient.DeleteObc(obcName, installer.ObjectStoreSCName, bucketPrefix, maxObject, false)
+		_ = s.helper.BucketClient.DeleteBucketStorageClass(s.namespace, installer.ObjectStoreName, installer.ObjectStoreSCName, "Delete")
+		objectStoreCleanUp(&s.Suite, s.helper, s.k8sh, s.settings.Namespace, installer.ObjectStoreName)
+	}()
+
+	//
+	// Upgrade from tentacle to tentacle devel
+	//
+	logger.Infof("*** UPGRADING CEPH FROM TENTACLE STABLE TO TENTACLE DEVEL ***")
+	s.gatherLogs(s.settings.OperatorNamespace, "_before_tentacle_upgrade")
+	s.upgradeCephVersion(installer.TentacleDevelVersion.Image, numOSDs)
+	// Verify reading and writing to the test clients
+	newFile := "post-tentacle-upgrade-file"
+	s.verifyFilesAfterUpgrade(newFile, rbdFilesToRead, cephfsFilesToRead)
+	logger.Infof("verified upgrade from tentacle stable to tentacle devel")
 
 	checkCephObjectUser(&s.Suite, s.helper, s.k8sh, s.namespace, installer.ObjectStoreName, objectUserID, false)
 }
@@ -454,9 +454,7 @@ func (s *UpgradeSuite) upgradeToMaster() {
 		return
 	}
 
-	require.NoError(s.T(), s.installer.InstallCSIOperator())
-	require.NoError(s.T(), s.installer.SetOperatorSetting("ROOK_USE_CSI_OPERATOR", "true"))
-
+	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", s.installer.Manifests.GetCSIOperator()))
 	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", s.installer.Manifests.GetCRDs(s.k8sh)))
 
 	require.NoError(s.T(), s.k8sh.ResourceOperation("apply", s.installer.Manifests.GetCommon()))

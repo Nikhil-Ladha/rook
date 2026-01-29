@@ -1,5 +1,5 @@
-name: Cluster Setup
-description: Cluster setup for integration test
+name: setup cluster resources
+description: Setup cluster resources for canary/integration tests
 inputs:
   kubernetes-version:
     description: kubernetes version to use for the workflow
@@ -18,14 +18,34 @@ runs:
         haskell: false # takes a long time to run b/c package mgr
 
     - name: setup golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
       with:
-        go-version: "1.24"
+        go-version: "1.25"
 
-    - name: Setup Minikube
+    - name: Install cri-dockerd
       shell: bash --noprofile --norc -eo pipefail -x {0}
       run: |
-        tests/scripts/github-action-helper.sh install_minikube_with_none_driver ${{ inputs.kubernetes-version }}
+        curl -LO https://github.com/Mirantis/cri-dockerd/releases/download/v0.3.21/cri-dockerd_0.3.21.3-0.ubuntu-focal_amd64.deb
+        sudo dpkg -i cri-dockerd_0.3.21.3-0.ubuntu-focal_amd64.deb
+        rm -f cri-dockerd_0.3.21.3-0.ubuntu-focal_amd64.deb
+
+    - name: Setup Minikube
+      uses: medyagh/setup-minikube@latest
+      with:
+        # lock minikube version to ensure release branch CI doesn't fail when latest minikube no
+        # longer supports older k8s version we lock to
+        minikube-version: "1.37.0"
+        kubernetes-version: ${{ inputs.kubernetes-version }}
+        driver: none
+        container-runtime: docker
+        memory: 6g
+        cpus: 2
+        addons: ingress
+        cni: calico
+
+    - name: install deps
+      shell: bash --noprofile --norc -eo pipefail -x {0}
+      run: tests/scripts/github-action-helper.sh install_deps
 
     - name: print k8s cluster status
       shell: bash --noprofile --norc -eo pipefail -x {0}

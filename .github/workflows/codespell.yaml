@@ -24,11 +24,11 @@ jobs:
     name: codespell
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 0
       - name: codespell
-        uses: codespell-project/actions-codespell@406322ec52dd7b488e48c1c4b82e2a8b3a1bf630 # master
+        uses: codespell-project/actions-codespell@8f01853be192eb0f849a5c7d721450e7a467c579 # master
         with:
           # LICENSE: skip file because codespell wants to flag complies, which we may want to flag
           # in other places, so ignore the file itself assuming it is correct
@@ -46,15 +46,15 @@ jobs:
           # parm: modinfo parameter
           # assigment: inherited from K8s TopologySpreadConstraints dependency
           # ro, RO: means read-only
-          ignore_words_list: aks,keyserver,atleast,ser,ist,ba,iam,te,parm,assigment,ro,RO,addin,NotIn
+          ignore_words_list: aks,keyserver,atleast,ser,ist,ba,iam,te,parm,assigment,ro,RO,addin,NotIn,Parth
           check_filenames: true
           check_hidden: true
   misspell:
     name: misspell
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
         with:
           fetch-depth: 0
       - name: misspell
-        uses: reviewdog/action-misspell@9daa94af4357dddb6fd3775de806bc0a8e98d3e4 # v1.26.3
+        uses: reviewdog/action-misspell@d6429416b12b09b4e2768307d53bef58d172e962 # v1.27.0

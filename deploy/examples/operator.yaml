@@ -119,12 +119,12 @@ data:
   # The default version of CSI supported by Rook will be started. To change the version
   # of the CSI driver to something other than what is officially supported, change
   # these images to the desired release of the CSI driver.
-  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.15.0"
-  # ROOK_CSI_REGISTRAR_IMAGE: "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0"
-  # ROOK_CSI_RESIZER_IMAGE: "registry.k8s.io/sig-storage/csi-resizer:v1.13.2"
-  # ROOK_CSI_PROVISIONER_IMAGE: "registry.k8s.io/sig-storage/csi-provisioner:v5.2.0"
-  # ROOK_CSI_SNAPSHOTTER_IMAGE: "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.1"
-  # ROOK_CSI_ATTACHER_IMAGE: "registry.k8s.io/sig-storage/csi-attacher:v4.8.1"
+  # ROOK_CSI_CEPH_IMAGE: "quay.io/cephcsi/cephcsi:v3.16.0"
+  # ROOK_CSI_REGISTRAR_IMAGE: "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0"
+  # ROOK_CSI_RESIZER_IMAGE: "registry.k8s.io/sig-storage/csi-resizer:v2.0.0"
+  # ROOK_CSI_PROVISIONER_IMAGE: "registry.k8s.io/sig-storage/csi-provisioner:v6.0.0"
+  # ROOK_CSI_SNAPSHOTTER_IMAGE: "registry.k8s.io/sig-storage/csi-snapshotter:v8.4.0"
+  # ROOK_CSI_ATTACHER_IMAGE: "registry.k8s.io/sig-storage/csi-attacher:v4.10.0"
 
   # To indicate the image pull policy to be applied to all the containers in the csi driver pods.
   # ROOK_CSI_IMAGE_PULL_POLICY: "IfNotPresent"
@@ -511,7 +511,7 @@ data:
   CSI_ENABLE_CSIADDONS: "false"
   # Enable watch for faster recovery from rbd rwo node loss
   ROOK_WATCH_FOR_NODE_FAILURE: "true"
-  # ROOK_CSIADDONS_IMAGE: "quay.io/csiaddons/k8s-sidecar:v0.13.0"
+  # ROOK_CSIADDONS_IMAGE: "quay.io/csiaddons/k8s-sidecar:v0.14.0"
   # The CSI GRPC timeout value (in seconds). It should be >= 120. If this variable is not set or is an invalid value, it's default to 150.
   CSI_GRPC_TIMEOUT_SECONDS: "150"
 
@@ -635,6 +635,14 @@ spec:
             # If this is not set to true, the operator will watch for cluster CRDs in all namespaces.
             - name: ROOK_CURRENT_NAMESPACE_ONLY
               value: "false"
+
+            # Experimental: The number of Ceph clusters to reconcile in parallel.
+            # The default is 1, which means each cluster is reconciled sequentially within the operator.
+            # When set to a value greater than 1, the operator can reconcile multiple clusters concurrently,
+            # and all logging will be interleaved in the same operator log.
+            # Changing this value requires restarting the operator pod.
+            - name: ROOK_RECONCILE_CONCURRENT_CLUSTERS
+              value: "1"
 
             # Whether to start pods as privileged that mount a host path, which includes the Ceph mon, osd pods and csi provisioners(if logrotation is on).
             # Set this to true if SELinux is enabled (e.g. OpenShift) to workaround the anyuid issues.

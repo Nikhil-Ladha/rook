@@ -18,21 +18,27 @@ package object
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+const (
+	replicaCountNotAvailable = -1
+)
+
 func (r *ReconcileCephObjectStore) setFailedStatus(observedGeneration int64, name types.NamespacedName, errMessage string, err error) (reconcile.Result, error) {
-	statusErr := updateStatus(r.opManagerContext, observedGeneration, r.client, name, cephv1.ConditionFailure, map[string]string{}, nil)
+	statusErr := updateStatus(r.opManagerContext, observedGeneration, replicaCountNotAvailable, r.client, name, cephv1.ConditionFailure, map[string]string{}, nil)
 	if statusErr != nil {
 		return reconcile.Result{}, errors.Wrapf(statusErr, "failed to set failed status for object store %q", name)
 	}
@@ -40,14 +46,14 @@ func (r *ReconcileCephObjectStore) setFailedStatus(observedGeneration int64, nam
 }
 
 // updateStatus updates an object with a given status
-func updateStatus(ctx context.Context, observedGeneration int64, client client.Client, namespacedName types.NamespacedName, status cephv1.ConditionType, info map[string]string, cephx *cephv1.CephxStatus) error {
+func updateStatus(ctx context.Context, observedGeneration int64, replicaCount int32, client client.Client, namespacedName types.NamespacedName, status cephv1.ConditionType, info map[string]string, cephx *cephv1.CephxStatus) error {
 	// Updating the status is important to users, but we can still keep operating if there is a
 	// failure. Retry a few times to give it our best effort attempt.
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		objectStore := &cephv1.CephObjectStore{}
 		if err := client.Get(ctx, namespacedName, objectStore); err != nil {
 			if kerrors.IsNotFound(err) {
-				logger.Debug("CephObjectStore resource not found. Ignoring since object must be deleted.")
+				log.NamedDebug(namespacedName, logger, "CephObjectStore resource not found. Ignoring since object must be deleted.")
 				return nil
 			}
 			return errors.Wrapf(err, "failed to retrieve object store %q to update status to %q", namespacedName.String(), status)
@@ -62,12 +68,17 @@ func updateStatus(ctx context.Context, observedGeneration int64, client client.C
 		}
 
 		if objectStore.Status.Phase == cephv1.ConditionDeleting {
-			logger.Debugf("object store %q status not updated to %q because it is deleting", namespacedName.String(), status)
+			log.NamedDebug(namespacedName, logger, "object store status not updated to %q because it is deleting", status)
 			return nil // do not transition to other statuses once deletion begins
 		}
 
 		objectStore.Status.Phase = status
 		objectStore.Status.Info = info
+		if replicaCount != replicaCountNotAvailable {
+			objectStore.Status.Replicas = replicaCount
+		}
+
+		objectStore.Status.Selector = labels.SelectorFromSet(getLabels(objectStore.Name, objectStore.Namespace, false)).String()
 		if observedGeneration != k8sutil.ObservedGenerationNotAvailable {
 			objectStore.Status.ObservedGeneration = observedGeneration
 		}
@@ -94,19 +105,19 @@ func updateStatus(ctx context.Context, observedGeneration int64, client client.C
 		return err
 	}
 
-	logger.Debugf("object store %q status updated to %q", namespacedName.String(), status)
+	log.NamedDebug(namespacedName, logger, "object store status updated to %q", status)
 	return nil
 }
 
 func buildStatusInfo(cephObjectStore *cephv1.CephObjectStore) map[string]string {
-	nsName := fmt.Sprintf("%s/%s", cephObjectStore.Namespace, cephObjectStore.Name)
+	nsName := controller.NsName(cephObjectStore.Namespace, cephObjectStore.Name)
 
 	m := make(map[string]string)
 
 	advertiseEndpoint, err := cephObjectStore.GetAdvertiseEndpointUrl()
 	if err != nil {
 		// lots of validation happens before this point, so this should be nearly impossible
-		logger.Errorf("failed to get advertise endpoint for CephObjectStore %q to record on status; continuing without this. %v", nsName, err)
+		log.NamedError(nsName, logger, "failed to get advertise endpoint for CephObjectStore %q to record on status; continuing without this. %v", nsName, err)
 	}
 
 	if cephObjectStore.AdvertiseEndpointIsSet() {

@@ -76,8 +76,8 @@ type OSDDump struct {
 
 // IsFlagSet checks if an OSD flag is set
 func (dump *OSDDump) IsFlagSet(checkFlag string) bool {
-	flags := strings.Split(dump.Flags, ",")
-	for _, flag := range flags {
+	flags := strings.SplitSeq(dump.Flags, ",")
+	for flag := range flags {
 		if flag == checkFlag {
 			return true
 		}
@@ -410,7 +410,7 @@ type OSDOkToStopStats struct {
 // This is relevant, for example, when checking which OSDs can be updated.
 // The number of OSDs returned is limited by the value set in maxReturned.
 // maxReturned=0 is the same as maxReturned=1.
-func OSDOkToStop(context *clusterd.Context, clusterInfo *ClusterInfo, osdID, maxReturned int) ([]int, error) {
+func OSDOkToStop(context *clusterd.Context, clusterInfo *ClusterInfo, osdID int, maxReturned uint32) ([]int, error) {
 	args := []string{"osd", "ok-to-stop", strconv.Itoa(osdID)}
 	// NOTE: if the number of OSD IDs given in the CLI arg query is Q and --max=N is given, if
 	// N < Q, Ceph treats the query as though max=Q instead, always returning at least Q OSDs.
@@ -467,12 +467,12 @@ func GetOSDMetadata(context *clusterd.Context, clusterInfo *ClusterInfo) (*[]OSD
 	return &osdMetadata, nil
 }
 
-// BlocklistIP blocklists the IP for predefined duration
-func BlocklistIP(context *clusterd.Context, clusterInfo *ClusterInfo, ip, duration string) error {
-	args := []string{"osd", "blocklist", "add", ip, duration}
+// Blocklist blocklists the client address for predefined duration
+func Blocklist(context *clusterd.Context, clusterInfo *ClusterInfo, address, duration string) error {
+	args := []string{"osd", "blocklist", "add", address, duration}
 	_, err := NewCephCommand(context, clusterInfo, args).Run()
 	if err != nil {
-		return errors.Wrapf(err, "failed to blockist IP %q", ip)
+		return errors.Wrapf(err, "failed to blockist client %q", address)
 	}
 	return nil
 }

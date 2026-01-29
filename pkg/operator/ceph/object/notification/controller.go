@@ -33,6 +33,8 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/object/bucket"
 	"github.com/rook/rook/pkg/operator/ceph/object/topic"
 	"github.com/rook/rook/pkg/operator/ceph/reporting"
+	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	kapiv1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -124,7 +126,11 @@ func (r *ReconcileNotifications) Reconcile(context context.Context, request reco
 	defer opcontroller.RecoverAndLogException()
 	reconcileResponse, notification, err := r.reconcile(request)
 	if err != nil {
-		logger.Errorf("failed to reconcile %v", err)
+		r.updateStatus(k8sutil.ObservedGenerationNotAvailable, request.NamespacedName, k8sutil.ReconcileFailedStatus)
+		log.NamedError(request.NamespacedName, logger, "failed to reconcile %v", err)
+	} else {
+		// Successful reconciliation
+		r.updateStatus(notification.Generation, request.NamespacedName, k8sutil.ReadyStatus)
 	}
 
 	return reporting.ReportReconcileResult(logger, r.recorder, request, &notification, reconcileResponse, err)
@@ -138,7 +144,7 @@ func (r *ReconcileNotifications) reconcile(request reconcile.Request) (reconcile
 	err := r.client.Get(r.opManagerContext, request.NamespacedName, notification)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			logger.Debugf("CephBucketNotification %q resource not found. Ignoring since resource must be deleted.", bnName)
+			log.NamedDebug(request.NamespacedName, logger, "CephBucketNotification resource not found. Ignoring since resource must be deleted.")
 			return reconcile.Result{}, *notification, nil
 		}
 		// Error reading the object - requeue the request.
@@ -147,10 +153,13 @@ func (r *ReconcileNotifications) reconcile(request reconcile.Request) (reconcile
 
 	// DELETE: the CR was deleted
 	if !notification.GetDeletionTimestamp().IsZero() {
-		logger.Debugf("CephBucketNotification %q was deleted", bnName)
+		log.NamedDebug(request.NamespacedName, logger, "CephBucketNotification was deleted")
 		// Return and do not requeue. Successful deletion.
 		return reconcile.Result{}, *notification, nil
 	}
+
+	// Start object reconciliation, updating status for this
+	r.updateStatus(k8sutil.ObservedGenerationNotAvailable, request.NamespacedName, k8sutil.ReconcilingStatus)
 
 	// get the topic associated with the notification, and make sure it is provisioned
 	topicName := types.NamespacedName{Namespace: notification.Namespace, Name: notification.Spec.Topic}
@@ -179,7 +188,7 @@ func (r *ReconcileNotifications) reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, *notification, errors.Wrapf(err, "failed to list ObjectBucketClaims for CephBucketNotification %q", bnName)
 	}
 	if len(obcList.Items) == 0 {
-		logger.Debugf("no ObjectbucketClaim associated with CephBucketNotification %q", bnName)
+		log.NamedDebug(request.NamespacedName, logger, "no ObjectbucketClaim associated with CephBucketNotification")
 		return reconcile.Result{}, *notification, nil
 	}
 
@@ -218,7 +227,7 @@ func (r *ReconcileNotifications) reconcile(request reconcile.Request) (reconcile
 		if err != nil {
 			return reconcile.Result{}, *notification, errors.Wrapf(err, "failed to provision notification for ObjectBucketClaims %q", bucketName)
 		}
-		logger.Infof("provisioned CephBucketNotification %q for ObjectBucketClaims %q", bnName, bucketName)
+		log.NamedInfo(request.NamespacedName, logger, "provisioned CephBucketNotification for ObjectBucketClaims %q", bucketName)
 	}
 
 	return reconcile.Result{}, *notification, nil
@@ -248,7 +257,7 @@ func getReadyCluster(client client.Client, opManagerContext context.Context, con
 		controllerName,
 	)
 	if !isReadyToReconcile || !cephClusterExists {
-		logger.Debug("Ceph cluster not yet present.")
+		log.NamespacedDebug(objectStoreNamespace, logger, "Ceph cluster not yet present.")
 		return nil, nil, nil
 	}
 	clusterInfo, _, _, err := opcontroller.LoadClusterInfo(&context, opManagerContext, cephCluster.Namespace, &cephCluster.Spec)
@@ -256,4 +265,35 @@ func getReadyCluster(client client.Client, opManagerContext context.Context, con
 		return nil, nil, errors.Wrap(err, "failed to populate cluster info")
 	}
 	return clusterInfo, &cephCluster.Spec, nil
+}
+
+// updates .status.phase and .status.observedGeneration
+func (r *ReconcileNotifications) updateStatus(observedGeneration int64, nsName types.NamespacedName, status string) {
+	notification := &cephv1.CephBucketNotification{}
+	if err := r.client.Get(r.opManagerContext, nsName, notification); err != nil {
+		if kerrors.IsNotFound(err) {
+			log.NamedDebug(nsName, logger, "CephBucketNotification resource not found. Ignoring since object must be deleted.")
+			return
+		}
+
+		log.NamedWarning(nsName, logger, "failed to retrieve CephBucketNotification %q to update status to %q. %v", nsName, status, err)
+		return
+	}
+
+	if notification.Status == nil {
+		notification.Status = &cephv1.Status{}
+	}
+
+	notification.Status.Phase = status
+
+	if observedGeneration != k8sutil.ObservedGenerationNotAvailable {
+		notification.Status.ObservedGeneration = observedGeneration
+	}
+
+	if err := reporting.UpdateStatus(r.client, notification); err != nil {
+		log.NamedError(nsName, logger, "failed to set CephBucketNotification %q status to %q. error %v", nsName, status, err)
+		return
+	}
+
+	log.NamedDebug(nsName, logger, "CephBucketNotification %q status updated to %q", nsName, status)
 }

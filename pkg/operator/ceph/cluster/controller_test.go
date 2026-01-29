@@ -18,6 +18,7 @@ package cluster
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	apifake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -83,9 +83,9 @@ func TestReconcileDeleteCephCluster(t *testing.T) {
 	t.Run("deletion blocked while dependencies exist", func(t *testing.T) {
 		// set up clusterd.Context
 		clusterdCtx := &clusterd.Context{
-			Clientset:           k8sfake.NewSimpleClientset(),
+			Clientset:           k8sfake.NewClientset(),
 			RookClientset:       rookclient.NewSimpleClientset(),
-			ApiExtensionsClient: apifake.NewSimpleClientset(),
+			ApiExtensionsClient: apifake.NewClientset(),
 		}
 
 		// create the cluster controller and tell it that the cluster has been deleted
@@ -138,8 +138,15 @@ func TestReconcileDeleteCephCluster(t *testing.T) {
 
 		unblockedCluster := &cephv1.CephCluster{}
 		err = client.Get(ctx, nsName, unblockedCluster)
-		assert.Error(t, err)
-		assert.True(t, kerrors.IsNotFound(err))
+		assert.NoError(t, err)
+		assert.Equal(t, 2, len(unblockedCluster.Status.Conditions))
+		condition := unblockedCluster.Status.Conditions[0]
+		if condition.Type != cephv1.ConditionDeletionIsBlocked {
+			condition = unblockedCluster.Status.Conditions[1]
+		}
+		assert.Equal(t, cephv1.ConditionDeletionIsBlocked, condition.Type)
+		assert.True(t, strings.Contains(condition.Message, "has no dependent custom resources blocking deletion"))
+		logger.Infof("condition: %+v", condition)
 	})
 }
 
@@ -202,4 +209,60 @@ func TestRemoveFinalizers(t *testing.T) {
 			assert.Empty(t, fakeObject.GetFinalizers())
 		})
 	}
+}
+
+func TestReconcileSkipsWhenSkipReconcileLabelSet(t *testing.T) {
+	cephNs := "rook-ceph"
+	clusterName := "my-cluster"
+	nsName := types.NamespacedName{
+		Name:      clusterName,
+		Namespace: cephNs,
+	}
+
+	// create a Rook-Ceph scheme to use for our tests
+	s := runtime.NewScheme()
+	assert.NoError(t, cephv1.AddToScheme(s))
+	assert.NoError(t, corev1.AddToScheme(s))
+
+	fakeCluster := &cephv1.CephCluster{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "CephCluster",
+			APIVersion: "ceph.rook.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterName,
+			Namespace: cephNs,
+			Finalizers: []string{
+				"cephcluster.ceph.rook.io",
+			},
+			Labels: map[string]string{
+				cephv1.SkipReconcileLabelKey: "true",
+			},
+		},
+	}
+
+	clusterdCtx := &clusterd.Context{}
+	controller := NewClusterController(clusterdCtx, "")
+	fakeRecorder := record.NewFakeRecorder(5)
+	controller.recorder = fakeRecorder
+
+	// Create a fake client to mock API calls
+	client := clientfake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(fakeCluster).Build()
+
+	reconcileCephCluster := &ReconcileCephCluster{
+		client:            client,
+		scheme:            s,
+		context:           clusterdCtx,
+		clusterController: controller,
+		opManagerContext:  context.TODO(),
+	}
+
+	resp, _, err := reconcileCephCluster.reconcile(reconcile.Request{NamespacedName: nsName})
+	assert.NoError(t, err)
+	assert.True(t, resp.IsZero())
+
+	// Verify we emit the ReconcileSkipped event when the skip-reconcile label is set.
+	event := <-fakeRecorder.Events
+	assert.Contains(t, event, "ReconcileSkipped")
+	assert.Contains(t, event, cephv1.SkipReconcileLabelKey)
 }

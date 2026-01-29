@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"path"
 	"reflect"
@@ -862,11 +863,17 @@ func RgwOpsLogSidecarContainer(opsLogFile, ns string, c cephv1.ClusterSpec, env 
 // CreateExternalMetricsEndpoints creates external metric endpoint
 func createExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.MonitoringSpec, ownerInfo *k8sutil.OwnerInfo) (*discoveryv1.EndpointSlice, error) {
 	labels := AppLabels("rook-ceph-mgr", namespace)
+	labels[discoveryv1.LabelServiceName] = ExternalMgrAppName
 
 	// Convert v1.EndpointAddress to string addresses
 	addresses := make([]string, len(monitoringSpec.ExternalMgrEndpoints))
 	for i, endpoint := range monitoringSpec.ExternalMgrEndpoints {
 		addresses[i] = endpoint.IP
+	}
+
+	addressType, err := k8sutil.GetIpAddressType(addresses)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get the addressType")
 	}
 
 	endpoints := &discoveryv1.EndpointSlice{
@@ -875,7 +882,7 @@ func createExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.Moni
 			Namespace: namespace,
 			Labels:    labels,
 		},
-		AddressType: discoveryv1.AddressTypeIPv4,
+		AddressType: addressType,
 		Endpoints: []discoveryv1.Endpoint{
 			{
 				Addresses: addresses,
@@ -893,7 +900,7 @@ func createExternalMetricsEndpoints(namespace string, monitoringSpec cephv1.Moni
 		},
 	}
 
-	err := ownerInfo.SetControllerReference(endpoints)
+	err = ownerInfo.SetControllerReference(endpoints)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to set owner reference to metric endpoints %q", endpoints.Name)
 	}
@@ -954,7 +961,12 @@ func ConfigureExternalMetricsEndpoint(ctx *clusterd.Context, monitoringSpec ceph
 }
 
 func extractMgrIP(rawActiveAddr string) string {
-	return strings.Split(rawActiveAddr, ":")[0]
+	host, _, err := net.SplitHostPort(rawActiveAddr)
+	if err != nil {
+		// If there's no port, return as is
+		return rawActiveAddr
+	}
+	return host
 }
 
 func GetContainerImagePullPolicy(containerImagePullPolicy v1.PullPolicy) v1.PullPolicy {

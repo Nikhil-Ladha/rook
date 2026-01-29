@@ -13,6 +13,9 @@ inputs:
   ceph-image:
     description: the name of ceph image
     required: true
+  kubernetes-version:
+    description: kubernetes version to use for the workflow
+    required: true
 
 runs:
   using: "composite"
@@ -26,7 +29,9 @@ runs:
       run: echo "IBM_KP_SERVICE_INSTANCE_ID and IBM_KP_SERVICE_API_KEY must be set in the environment" && exit 0
 
     - name: setup cluster resources
-      uses: ./.github/workflows/canary-test-config
+      uses: ./.github/workflows/integration-test-setup-cluster-resources
+      with:
+        kubernetes-version: ${{ inputs.kubernetes-version }}
 
     - name: set Ceph version in CephCluster manifest
       shell: bash --noprofile --norc -eo pipefail -x {0}
@@ -52,6 +57,7 @@ runs:
         IBM_KP_SERVICE_API_KEY: ${{ inputs.ibm-service-api-key }}
       run: |
         tests/scripts/github-action-helper.sh deploy_manifest_with_local_build deploy/examples/operator.yaml
+        tests/scripts/github-action-helper.sh deploy_manifest_with_local_build deploy/examples/csi-operator.yaml
         envsubst < "tests/manifests/test-kms-ibm-kp-secret.in" > "tests/manifests/test-kms-ibm-kp-secret.yaml"
         envsubst < "tests/manifests/test-kms-ibm-kp-spec.in" > "tests/manifests/test-kms-ibm-kp-spec.yaml"
         cat tests/manifests/test-kms-ibm-kp-secret.yaml >> tests/manifests/test-cluster-on-pvc-encrypted.yaml

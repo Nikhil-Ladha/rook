@@ -27,12 +27,25 @@ import (
 	discoverDaemon "github.com/rook/rook/pkg/daemon/discover"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+)
+
+// Always trigger a reconcile when a secret is deleted. This will cause a
+// reconciliation failure to happen immediately in hopes of alerting the end
+// user to the configuration problem.
+var changedOrDeleted = predicate.Or(
+	predicate.TypedResourceVersionChangedPredicate[*corev1.Secret]{},
+	predicate.TypedFuncs[*corev1.Secret]{
+		DeleteFunc: func(e event.TypedDeleteEvent[*corev1.Secret]) bool {
+			return true
+		},
+	},
 )
 
 func shouldReconcileChangedNode(objOld, objNew *corev1.Node) bool {
@@ -139,7 +152,7 @@ func predicateForOperatorConfigCMWatcher[T *corev1.ConfigMap]() predicate.TypedF
 			}
 
 			if objOld.Data["ROOK_USE_CSI_OPERATOR"] != objNew.Data["ROOK_USE_CSI_OPERATOR"] {
-				logger.Infof("ROOK_USE_CSI_OPERATOR changed from %q to %q", objOld.Data["ROOK_USE_CSI_OPERATOR"], objNew.Data["ROOK_USE_CSI_OPERATOR"])
+				log.NamespacedInfo(objNew.Namespace, logger, "ROOK_USE_CSI_OPERATOR changed from %q to %q", objOld.Data["ROOK_USE_CSI_OPERATOR"], objNew.Data["ROOK_USE_CSI_OPERATOR"])
 				return true
 			}
 
@@ -196,18 +209,36 @@ func watchControllerPredicate[T *cephv1.CephCluster](ctx context.Context, c clie
 			objOld := (*cephv1.CephCluster)(e.ObjectOld)
 			objNew := (*cephv1.CephCluster)(e.ObjectNew)
 
-			logger.Debug("update event on CephCluster CR")
-			// If the labels "do_not_reconcile" is set on the object, let's not reconcile that request
+			log.NamespacedDebug(objNew.Namespace, logger, "update event on CephCluster CR")
+			// If the user sets the skip-reconcile label, avoid doing anything (including manager reloads)
+			// for this CephCluster.
+			//
+			// However, we still want to trigger a reconcile when the label is added/removed so the
+			// controller can early-exit and record a "ReconcileSkipped" event (when label is added),
+			// and also resume reconciliation immediately when the label is removed.
+			_, oldHasSkipLabel := objOld.GetLabels()[cephv1.SkipReconcileLabelKey]
+			_, newHasSkipLabel := objNew.GetLabels()[cephv1.SkipReconcileLabelKey]
+			if oldHasSkipLabel != newHasSkipLabel {
+				log.NamespacedDebug(objNew.Namespace, logger, "CephCluster %q skip-reconcile label changed (%v -> %v); triggering reconcile", objNew.Name, oldHasSkipLabel, newHasSkipLabel)
+				return true
+			}
+			if newHasSkipLabel {
+				log.NamespacedInfo(objNew.Namespace, logger, "object %q matched on update but %q label is set, doing nothing", objNew.Name, cephv1.SkipReconcileLabelKey)
+				return false
+			}
+
+			// Backwards/alternative label used by some controllers to avoid reconciling an object.
+			// If this label is set on the object, let's not reconcile that request.
 			if opcontroller.IsDoNotReconcile(objNew.GetLabels()) {
-				logger.Debugf("object %q matched on update but %q label is set, doing nothing", opcontroller.DoNotReconcileLabelName, objNew.Name)
+				log.NamespacedDebug(objNew.Namespace, logger, "object %q matched on update but %q label is set, doing nothing", opcontroller.DoNotReconcileLabelName, objNew.Name)
 				return false
 			}
 			diff := cmp.Diff(objOld.Spec, objNew.Spec, resourceQtyComparer)
 			if diff != "" {
-				logger.Infof("CR has changed for %q. diff=%s", objNew.Name, diff)
+				log.NamespacedInfo(objNew.Namespace, logger, "CR has changed for %q. diff=%s", objNew.Name, diff)
 
 				if objNew.Spec.CleanupPolicy.HasDataDirCleanPolicy() {
-					logger.Infof("skipping orchestration for cluster object %q in namespace %q because its cleanup policy is set. not reloading the manager", objNew.GetName(), objNew.GetNamespace())
+					log.NamespacedInfo(objNew.Namespace, logger, "skipping orchestration for cluster object %q in namespace %q because its cleanup policy is set. not reloading the manager", objNew.GetName(), objNew.GetNamespace())
 					return false
 				}
 
@@ -217,7 +248,7 @@ func watchControllerPredicate[T *cephv1.CephCluster](ctx context.Context, c clie
 				return false
 
 			} else if !objOld.GetDeletionTimestamp().Equal(objNew.GetDeletionTimestamp()) {
-				logger.Infof("CR %q is going be deleted, cancelling any ongoing orchestration", objNew.Name)
+				log.NamespacedInfo(objNew.Namespace, logger, "CR %q is going be deleted, cancelling any ongoing orchestration", objNew.Name)
 
 				// Stop any ongoing orchestration
 				opcontroller.ReloadManager()
@@ -225,7 +256,7 @@ func watchControllerPredicate[T *cephv1.CephCluster](ctx context.Context, c clie
 				return false
 
 			} else if objOld.GetGeneration() != objNew.GetGeneration() {
-				logger.Debugf("reconciling CephCluster %q with changed generation", objNew.Name)
+				log.NamespacedDebug(objNew.Namespace, logger, "reconciling CephCluster %q with changed generation", objNew.Name)
 				return true
 			}
 

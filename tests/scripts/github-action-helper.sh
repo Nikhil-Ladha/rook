@@ -26,6 +26,14 @@ SERVICE_UNAVAILABLE_ERROR="Service Unavailable"
 INTERNAL_ERROR="INTERNAL_ERROR"
 INTERNAL_SERVER_ERROR="500 Internal Server Error"
 
+# Architecture detection
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+  ARCH_SUFFIX="arm64"
+else
+  ARCH_SUFFIX="amd64"
+fi
+
 #############
 # FUNCTIONS #
 #############
@@ -60,7 +68,7 @@ function block_dev_basename() {
 }
 
 function install_deps() {
-  sudo wget https://github.com/mikefarah/yq/releases/download/3.4.1/yq_linux_amd64 -O /usr/local/bin/yq
+  sudo wget https://github.com/mikefarah/yq/releases/download/3.4.1/yq_linux_${ARCH_SUFFIX} -O /usr/local/bin/yq
   sudo chmod +x /usr/local/bin/yq
 }
 
@@ -242,7 +250,7 @@ function validate_yaml() {
   kubectl create -k "${cosi_crd_url}"
 
   # skipping folders and some yamls that are only for openshift.
-  manifests="$(find . -maxdepth 1 -type f -name '*.yaml' -and -not -name '*openshift*' -and -not -name 'scc*' -and -not -name 'psp*' -and -not -name 'kustomization*')"
+  manifests="$(find . -maxdepth 1 -type f -name '*.yaml' -and -not -name '*openshift*' -and -not -name 'scc*' -and -not -name 'kustomization*')"
   with_f_arg="$(echo "$manifests" | awk '{printf " -f %s",$1}')" # don't add newline
   # shellcheck disable=SC2086 # '-f manifest1.yaml -f manifest2.yaml etc.' should not be quoted
   kubectl create ${with_f_arg} --dry-run=client
@@ -711,38 +719,6 @@ function test_csi_nfs_workload {
   kubectl -n rook-ceph delete "$(kubectl -n rook-ceph get pod --selector=app=rook-ceph.nfs.csi.ceph.com-nodeplugin --field-selector=status.phase=Running -o name)"
   kubectl exec -t pod/csinfs-demo-pod -- dd if=/dev/random of=/var/lib/www/html/test1 oflag=direct bs=1M count=1
   kubectl exec -t pod/csinfs-demo-pod -- ls -alh /var/lib/www/html/
-}
-
-function install_minikube_with_none_driver() {
-  CRICTL_VERSION="v1.33.0"
-  MINIKUBE_VERSION="v1.36.0"
-
-  sudo apt update
-  sudo apt install -y conntrack socat
-  curl -LO https://storage.googleapis.com/minikube/releases/$MINIKUBE_VERSION/minikube_latest_amd64.deb
-  sudo dpkg -i minikube_latest_amd64.deb
-  rm -f minikube_latest_amd64.deb
-
-  curl -LO https://github.com/Mirantis/cri-dockerd/releases/download/v0.4.0/cri-dockerd_0.4.0.3-0.ubuntu-focal_amd64.deb
-  sudo dpkg -i cri-dockerd_0.4.0.3-0.ubuntu-focal_amd64.deb
-  rm -f cri-dockerd_0.4.0.3-0.ubuntu-focal_amd64.deb
-
-  wget https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRICTL_VERSION/crictl-$CRICTL_VERSION-linux-amd64.tar.gz
-  sudo tar zxvf crictl-$CRICTL_VERSION-linux-amd64.tar.gz -C /usr/local/bin
-  rm -f crictl-$CRICTL_VERSION-linux-amd64.tar.gz
-  sudo sysctl fs.protected_regular=0
-
-  CNI_PLUGIN_VERSION="v1.7.1"
-  CNI_PLUGIN_TAR="cni-plugins-linux-amd64-$CNI_PLUGIN_VERSION.tgz" # change arch if not on amd64
-  CNI_PLUGIN_INSTALL_DIR="/opt/cni/bin"
-
-  curl -LO "https://github.com/containernetworking/plugins/releases/download/$CNI_PLUGIN_VERSION/$CNI_PLUGIN_TAR"
-  sudo mkdir -p "$CNI_PLUGIN_INSTALL_DIR"
-  sudo tar -xf "$CNI_PLUGIN_TAR" -C "$CNI_PLUGIN_INSTALL_DIR"
-  rm "$CNI_PLUGIN_TAR"
-
-  export MINIKUBE_HOME=$HOME CHANGE_MINIKUBE_NONE_USER=true KUBECONFIG=$HOME/.kube/config
-  minikube start --kubernetes-version="$1" --driver=none --memory 6g --cpus=2 --addons ingress --cni=calico
 }
 
 function toolbox() {

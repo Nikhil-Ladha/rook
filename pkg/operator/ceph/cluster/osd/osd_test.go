@@ -37,6 +37,7 @@ import (
 	exectest "github.com/rook/rook/pkg/util/exec/test"
 	"github.com/stretchr/testify/assert"
 	apps "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,7 +92,7 @@ func TestOSDProperties(t *testing.T) {
 
 func TestStart(t *testing.T) {
 	namespace := "ns"
-	clientset := fake.NewSimpleClientset()
+	clientset := fake.NewClientset()
 	executor := &exectest.MockExecutor{
 		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
 			logger.Infof("ExecuteCommandWithOutputFile: %s %v", command, args)
@@ -193,7 +194,7 @@ func TestAddRemoveNode(t *testing.T) {
 	}
 
 	// set up a fake k8s client set and watcher to generate events that the operator will listen to
-	clientset := fake.NewSimpleClientset()
+	clientset := fake.NewClientset()
 	t.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
 
 	testexec.AddReadyNode(t, clientset, nodeName, "23.23.23.23")
@@ -390,7 +391,7 @@ func TestAddRemoveNode(t *testing.T) {
 
 func TestPostReconcileUpdateOSDProperties(t *testing.T) {
 	namespace := "ns"
-	clientset := fake.NewSimpleClientset()
+	clientset := fake.NewClientset()
 	removedDeviceClassOSD := ""
 	setDeviceClassOSD := ""
 	setDeviceClass := ""
@@ -471,7 +472,7 @@ func TestAddNodeFailure(t *testing.T) {
 	nodeName := "node1672"
 
 	// create a fake clientset that will return an error when the operator tries to create a job
-	clientset := fake.NewSimpleClientset()
+	clientset := fake.NewClientset()
 	clientset.PrependReactor("create", "jobs", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
 		return true, nil, errors.New("mock failed to create jobs")
 	})
@@ -522,9 +523,141 @@ func TestAddNodeFailure(t *testing.T) {
 	assert.NotNil(t, startErr)
 }
 
+func TestOSDProvisionCleanup(t *testing.T) {
+	// Test that we cleanup orphaned provision status configmaps and provision jobs during reconciliation.
+	missingNodeName := "missingNode"
+	existingNodeName := "existingNode"
+	namespace := "ns"
+
+	clientset := fake.NewClientset()
+
+	// Create orphaned status configmap
+	cmName := statusConfigMapName(missingNodeName)
+	cmLabels := statusConfigMapLabels(missingNodeName)
+	_, err := clientset.CoreV1().ConfigMaps(namespace).Create(context.TODO(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   cmName,
+			Labels: cmLabels,
+		},
+	}, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create orphaned provision job
+	orphanedJobName := provisionJobName(missingNodeName)
+	orphanedJobLabels := provisionJobLabels(namespace)
+	_, err = clientset.BatchV1().Jobs(namespace).Create(context.TODO(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   orphanedJobName,
+			Labels: orphanedJobLabels,
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						k8sutil.LabelHostname(): missingNodeName,
+					},
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create a non-orphaned provision job
+	nonOrphanedJobName := provisionJobName(existingNodeName)
+	nonOrphanedJobLabels := provisionJobLabels(namespace)
+	_, err = clientset.BatchV1().Jobs(namespace).Create(context.TODO(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   nonOrphanedJobName,
+			Labels: nonOrphanedJobLabels,
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					NodeSelector: map[string]string{
+						k8sutil.LabelHostname(): existingNodeName,
+					},
+				},
+			},
+		},
+	}, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create the existing node
+	_, err = clientset.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: existingNodeName,
+			Labels: map[string]string{
+				k8sutil.LabelHostname(): existingNodeName,
+			},
+		},
+	}, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	t.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
+
+	cephCluster := &cephv1.CephCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "testing",
+			Namespace: namespace,
+		},
+	}
+	// Objects to track in the fake client.
+	object := []runtime.Object{
+		cephCluster,
+	}
+	s := scheme.Scheme
+	// Create a fake client to mock API calls.
+	client := clientfake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(object...).Build()
+	clusterInfo := &cephclient.ClusterInfo{
+		Namespace:   namespace,
+		CephVersion: cephver.Squid,
+		Context:     context.TODO(),
+	}
+	clusterInfo.SetName("testcluster")
+	clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)
+	executor := &exectest.MockExecutor{
+		MockExecuteCommandWithOutput: func(command string, args ...string) (string, error) {
+			logger.Infof("ExecuteCommandWithOutput: %s %v", command, args)
+			if args[1] == "crush" && args[2] == "class" && args[3] == "ls" {
+				// Mock executor for OSD crush class list command, returning ssd as available device class
+				return `["ssd"]`, nil
+			}
+			if args[0] == "osd" && args[1] == "df" {
+				return osdDFResults, nil
+			}
+			return "", nil
+		},
+	}
+	ctx := &clusterd.Context{Clientset: clientset, Client: client, ConfigDir: "/var/lib/rook", Executor: executor}
+	spec := cephv1.ClusterSpec{
+		DataDirHostPath: ctx.ConfigDir,
+		Storage: cephv1.StorageScopeSpec{
+			Nodes: []cephv1.Node{},
+		},
+	}
+
+	c := New(ctx, clusterInfo, spec, "myversion")
+
+	// run the reconciliation
+	err = c.Start()
+	assert.Nil(t, err)
+
+	// validate that orphaned status configmap was deleted
+	_, err = clientset.CoreV1().ConfigMaps(namespace).Get(context.TODO(), cmName, metav1.GetOptions{})
+	assert.True(t, k8serrors.IsNotFound(err), "Orphaned status configmap was not deleted.")
+
+	// validate that orphaned provision job was deleted
+	_, err = clientset.BatchV1().Jobs(namespace).Get(context.TODO(), orphanedJobName, metav1.GetOptions{})
+	assert.True(t, k8serrors.IsNotFound(err), "Orphaned provision job was not deleted.")
+
+	// validate that the non-orphaned provision job was not deleted
+	_, err = clientset.BatchV1().Jobs(namespace).Get(context.TODO(), nonOrphanedJobName, metav1.GetOptions{})
+	assert.NoError(t, err, "non-orphaned provision job was deleted.")
+}
+
 func TestGetPVCHostName(t *testing.T) {
 	ctx := context.TODO()
-	clientset := fake.NewSimpleClientset()
+	clientset := fake.NewClientset()
 	clusterInfo := &cephclient.ClusterInfo{Namespace: "ns"}
 	clusterInfo.SetName("mycluster")
 	clusterInfo.OwnerInfo = cephclient.NewMinimumOwnerInfo(t)

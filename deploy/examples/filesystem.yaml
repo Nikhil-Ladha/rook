@@ -48,7 +48,7 @@ spec:
     # The number of active MDS instances
     activeCount: 1
     # Whether each active MDS instance will have an active standby with a warm metadata cache for faster failover.
-    # If false, standbys will be available, but will not have a warm cache.
+    # If true, double the number of mds daemons will be created.
     activeStandby: true
     # The affinity rules to apply to the mds deployment
     placement:
@@ -105,6 +105,15 @@ spec:
     #  requests:
     #    cpu: "500m"
     #    memory: "1024Mi"
+    # Factor applied to resources.limits.memory to determine the MDS cache memory limit.
+    # Default is 0.5 (50% of memory limit). MDS uses approximately 125% of this value in RAM.
+    # For high-volume file ingest/delete scenarios, consider lower values like 0.25.
+    # Valid range: 0.0 - 1.0
+    # cacheMemoryLimitFactor: 0.5
+    # Factor applied to resources.requests.memory when limits.memory is not set.
+    # Default is 0.8 (80% of memory request).
+    # Valid range: 0.0 - 1.0
+    # cacheMemoryRequestFactor: 0.8
     priorityClassName: system-cluster-critical
     livenessProbe:
       disabled: false
@@ -151,5 +160,5 @@ spec:
   # for disabling default values set (distributed=0)
   pinning:
     distributed: 1 # distributed=<0, 1> (disabled=0)
-    # export:                 # export=<0-256> (disabled=-1)
-    # random:                 # random=[0.0, 1.0](disabled=0.0)
+    # export:      # export=<0-256> (disabled=-1)
+    # random:      # random=[0.0, 1.0](disabled=0.0)

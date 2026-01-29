@@ -18,6 +18,7 @@ package osd
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -57,7 +59,7 @@ func NewOSDHealthMonitor(context *clusterd.Context, clusterInfo *client.ClusterI
 	// allow overriding the check interval
 	checkInterval := healthCheck.DaemonHealth.ObjectStorageDaemon.Interval
 	if checkInterval != nil {
-		logger.Infof("ceph osd status in namespace %q check interval %q", h.clusterInfo.Namespace, checkInterval.Duration.String())
+		log.NamespacedInfo(h.clusterInfo.Namespace, logger, "ceph osd status in namespace %q check interval %q", h.clusterInfo.Namespace, checkInterval.Duration.String())
 		h.interval = &checkInterval.Duration
 	}
 
@@ -65,22 +67,24 @@ func NewOSDHealthMonitor(context *clusterd.Context, clusterInfo *client.ClusterI
 }
 
 // Start runs monitoring logic for osds status at set intervals
-func (m *OSDHealthMonitor) Start(monitoringRoutines map[string]*opcontroller.ClusterHealth, daemon string) {
+func (m *OSDHealthMonitor) Start(monitoringRoutines *sync.Map, daemon string) {
 	for {
 		// We must perform this check otherwise the case will check an index that does not exist anymore and
 		// we will get an invalid pointer error and the go routine will panic
-		if _, ok := monitoringRoutines[daemon]; !ok {
-			logger.Infof("ceph cluster %q has been deleted. stopping monitoring of OSDs", m.clusterInfo.Namespace)
+		v, ok := monitoringRoutines.Load(daemon)
+		if !ok {
+			log.NamespacedInfo(m.clusterInfo.Namespace, logger, "ceph cluster %q has been deleted. stopping monitoring of OSDs", m.clusterInfo.Namespace)
 			return
 		}
+		health := v.(*opcontroller.ClusterHealth)
 		select {
 		case <-time.After(*m.interval):
-			logger.Debug("checking osd processes status.")
+			log.NamespacedDebug(m.clusterInfo.Namespace, logger, "checking osd processes status.")
 			m.checkOSDHealth()
 
-		case <-monitoringRoutines[daemon].InternalCtx.Done():
-			logger.Infof("stopping monitoring of OSDs in namespace %q", m.clusterInfo.Namespace)
-			delete(monitoringRoutines, daemon)
+		case <-health.InternalCtx.Done():
+			log.NamespacedInfo(m.clusterInfo.Namespace, logger, "stopping monitoring of OSDs in namespace %q", m.clusterInfo.Namespace)
+			monitoringRoutines.Delete(daemon)
 			return
 		}
 	}
@@ -95,7 +99,7 @@ func (m *OSDHealthMonitor) Update(removeOSDsIfOUTAndSafeToRemove bool) {
 func (m *OSDHealthMonitor) checkOSDHealth() {
 	err := m.checkOSDDump()
 	if err != nil {
-		logger.Debugf("failed to check OSD Dump. %v", err)
+		log.NamespacedDebug(m.clusterInfo.Namespace, logger, "failed to check OSD Dump. %v", err)
 	}
 }
 
@@ -112,7 +116,7 @@ func (m *OSDHealthMonitor) checkOSDDump() error {
 		}
 		id := int(id64)
 
-		logger.Debugf("validating status of osd.%d", id)
+		log.NamespacedDebug(m.clusterInfo.Namespace, logger, "validating status of osd.%d", id)
 
 		status, in, err := osdDump.StatusByID(int64(id))
 		if err != nil {
@@ -120,17 +124,17 @@ func (m *OSDHealthMonitor) checkOSDDump() error {
 		}
 
 		if status == upStatus {
-			logger.Debugf("osd.%d is healthy.", id)
+			log.NamespacedDebug(m.clusterInfo.Namespace, logger, "osd.%d is healthy.", id)
 			continue
 		}
 
-		logger.Debugf("osd.%d is marked 'DOWN'", id)
+		log.NamespacedDebug(m.clusterInfo.Namespace, logger, "osd.%d is marked 'DOWN'", id)
 
 		if in != inStatus {
-			logger.Debugf("osd.%d is marked 'OUT'", id)
+			log.NamespacedDebug(m.clusterInfo.Namespace, logger, "osd.%d is marked 'OUT'", id)
 			if m.removeOSDsIfOUTAndSafeToRemove {
 				if err := m.removeOSDDeploymentIfSafeToDestroy(id); err != nil {
-					logger.Errorf("error handling marked out osd osd.%d. %v", id, err)
+					log.NamespacedError(m.clusterInfo.Namespace, logger, "error handling marked out osd osd.%d. %v", id, err)
 				}
 			}
 		}
@@ -159,7 +163,7 @@ func (m *OSDHealthMonitor) removeOSDDeploymentIfSafeToDestroy(outOSDid int) erro
 			podDeletionTimeStamp := podCreationTimestamp.Add(graceTime)
 			currentTime := time.Now().UTC()
 			if podDeletionTimeStamp.Before(currentTime) {
-				logger.Infof("osd.%d is 'safe-to-destroy'. removing the osd deployment.", outOSDid)
+				log.NamespacedInfo(m.clusterInfo.Namespace, logger, "osd.%d is 'safe-to-destroy'. removing the osd deployment.", outOSDid)
 				if err := k8sutil.DeleteDeployment(m.clusterInfo.Context, m.context.Clientset, dp.Items[0].Namespace, dp.Items[0].Name); err != nil {
 					return errors.Wrapf(err, "failed to delete osd deployment %s", dp.Items[0].Name)
 				}

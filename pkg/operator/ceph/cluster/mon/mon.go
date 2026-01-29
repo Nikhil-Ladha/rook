@@ -44,6 +44,7 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/reporting"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/util/log"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -217,23 +218,14 @@ func (c *Cluster) Start(clusterInfo *cephclient.ClusterInfo, rookImage string, c
 		return nil, errors.Wrap(err, "failed to check pod memory")
 	}
 
-	logger.Infof("start running mons")
+	log.NamespacedInfo(c.Namespace, logger, "start running mons")
 
-	logger.Debugf("establishing ceph cluster info")
+	log.NamespacedDebug(c.Namespace, logger, "establishing ceph cluster info")
 	if err := c.initClusterInfo(cephVersion, c.ClusterInfo.NamespacedName().Name); err != nil {
 		return nil, errors.Wrap(err, "failed to initialize ceph cluster info")
 	}
 
-	logger.Infof("targeting the mon count %d", c.spec.Mon.Count)
-
-	monsToSkipReconcile, err := controller.GetDaemonsToSkipReconcile(c.ClusterInfo.Context, c.context, c.Namespace, config.MonType, AppName)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to check for mons to skip reconcile")
-	}
-	if monsToSkipReconcile.Len() > 0 {
-		logger.Warningf("skipping mon reconcile since mons are labeled with %s: %v", cephv1.SkipReconcileLabelKey, sets.List(monsToSkipReconcile))
-		return c.ClusterInfo, nil
-	}
+	log.NamespacedInfo(c.Namespace, logger, "targeting the mon count %d", c.spec.Mon.Count)
 
 	// create the mons for a new cluster or ensure mons are running in an existing cluster
 	return c.ClusterInfo, c.startMons(c.spec.Mon.Count)
@@ -246,8 +238,13 @@ func (c *Cluster) startMons(targetCount int) error {
 		return errors.Wrap(err, "failed to init mon config")
 	}
 
+	monsToSkipReconcile, err := controller.GetDaemonsToSkipReconcile(c.ClusterInfo.Context, c.context, c.Namespace, config.MonType, AppName)
+	if err != nil {
+		return errors.Wrap(err, "failed to check for mons to skip reconcile")
+	}
+
 	// Assign the mons to nodes
-	if err := c.assignMons(mons); err != nil {
+	if err := c.assignMons(mons, monsToSkipReconcile); err != nil {
 		return errors.Wrap(err, "failed to assign pods to mons")
 	}
 
@@ -263,7 +260,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			// fixed by updating the mon deployments. Instead of returning error here, log a
 			// warning, and retry setting this later.
 			setConfigsNeedsRetry = true
-			logger.Warningf("failed to set Rook and/or user-defined Ceph config options before starting mons; will retry after starting mons. %v", err)
+			log.NamespacedWarning(c.Namespace, logger, "failed to set Rook and/or user-defined Ceph config options before starting mons; will retry after starting mons. %v", err)
 		}
 	}
 
@@ -273,7 +270,7 @@ func (c *Cluster) startMons(targetCount int) error {
 			if c.ClusterInfo.Context.Err() != nil {
 				return c.ClusterInfo.Context.Err()
 			}
-			if err := c.ensureMonsRunning(mons, i, targetCount, true); err != nil {
+			if err := c.ensureMonsRunning(mons, i, targetCount, true, monsToSkipReconcile); err != nil {
 				return err
 			}
 
@@ -298,7 +295,7 @@ func (c *Cluster) startMons(targetCount int) error {
 	} else {
 		// Ensure all the expected mon deployments exist, but don't require full quorum to continue
 		lastMonIndex := len(mons) - 1
-		if err := c.ensureMonsRunning(mons, lastMonIndex, targetCount, false); err != nil {
+		if err := c.ensureMonsRunning(mons, lastMonIndex, targetCount, false, monsToSkipReconcile); err != nil {
 			return err
 		}
 
@@ -321,7 +318,7 @@ func (c *Cluster) startMons(targetCount int) error {
 		}
 	}
 
-	logger.Debugf("mon endpoints used are: %s", flattenMonEndpoints(c.ClusterInfo.AllMonitors()))
+	log.NamespacedDebug(c.Namespace, logger, "mon endpoints used are: %s", flattenMonEndpoints(c.ClusterInfo.AllMonitors()))
 
 	// reconcile mon PDB
 	if err := c.reconcileMonPDB(); err != nil {
@@ -376,14 +373,14 @@ func (c *Cluster) ConfigureArbiter() error {
 
 	monDump, err := cephclient.GetMonDump(c.context, c.ClusterInfo)
 	if err != nil {
-		logger.Warningf("attempting to enable arbiter after failed to detect if already enabled. %v", err)
+		log.NamespacedWarning(c.Namespace, logger, "attempting to enable arbiter after failed to detect if already enabled. %v", err)
 	} else if monDump.StretchMode {
 		if monDump.TiebreakerMon == c.arbiterMon {
-			logger.Infof("stretch mode is already enabled with tiebreaker %q", c.arbiterMon)
+			log.NamespacedInfo(c.Namespace, logger, "stretch mode is already enabled with tiebreaker %q", c.arbiterMon)
 			return nil
 		}
 		// Set the new mon tiebreaker
-		logger.Infof("updating tiebreaker mon from %q to %q", monDump.TiebreakerMon, c.arbiterMon)
+		log.NamespacedInfo(c.Namespace, logger, "updating tiebreaker mon from %q to %q", monDump.TiebreakerMon, c.arbiterMon)
 		if err := cephclient.SetNewTiebreaker(c.context, c.ClusterInfo, c.arbiterMon); err != nil {
 			return errors.Wrap(err, "failed to set new mon tiebreaker")
 		}
@@ -394,7 +391,7 @@ func (c *Cluster) ConfigureArbiter() error {
 	// The timeout is relatively short since the operator will requeue the reconcile
 	// and try again at a higher level if not yet found
 	failureDomain := c.getFailureDomainName()
-	logger.Infof("enabling stretch mode... waiting for two failure domains of type %q to be found in the CRUSH map after OSD initialization", failureDomain)
+	log.NamespacedInfo(c.Namespace, logger, "enabling stretch mode... waiting for two failure domains of type %q to be found in the CRUSH map after OSD initialization", failureDomain)
 	pollInterval := 5 * time.Second
 	totalWaitTime := 2 * time.Minute
 	err = wait.PollUntilContextTimeout(c.ClusterInfo.Context, pollInterval, totalWaitTime, true, func(ctx context.Context) (bool, error) {
@@ -408,7 +405,7 @@ func (c *Cluster) ConfigureArbiter() error {
 	// Wait for the .mgr pool to be created, which we expect is defined as a CephBlockPool
 	// We may be able to remove this code waiting for the pool once this is in the ceph release:
 	//  https://github.com/ceph/ceph/pull/61371
-	logger.Info("enabling stretch mode... waiting for the builtin .mgr pool to be created")
+	log.NamespacedInfo(c.Namespace, logger, "enabling stretch mode... waiting for the builtin .mgr pool to be created")
 	err = wait.PollUntilContextTimeout(c.ClusterInfo.Context, pollInterval, totalWaitTime, true, func(ctx context.Context) (bool, error) {
 		return c.builtinMgrPoolExists(), nil
 	})
@@ -443,7 +440,7 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 			return false, errors.Wrap(err, "failed to check whether all osds are running before enabling the arbiter")
 		}
 		if !allRunning {
-			logger.Infof("waiting for all OSD pods to be in running state")
+			log.NamespacedInfo(c.Namespace, logger, "waiting for all OSD pods to be in running state")
 			return false, nil
 		}
 	}
@@ -460,10 +457,10 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 		if bucket.TypeName == failureDomain {
 			// skip zones specific to device classes
 			if strings.Index(bucket.Name, "~") > 0 {
-				logger.Debugf("skipping device class bucket %q", bucket.Name)
+				log.NamespacedDebug(c.Namespace, logger, "skipping device class bucket %q", bucket.Name)
 				continue
 			}
-			logger.Infof("found %s %q in CRUSH map with weight %d", failureDomain, bucket.Name, bucket.Weight)
+			log.NamespacedInfo(c.Namespace, logger, "found %s %q in CRUSH map with weight %d", failureDomain, bucket.Name, bucket.Weight)
 			zoneCount++
 
 			// check that the weights of the failure domains are all the same
@@ -471,7 +468,7 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 				// found the first matching bucket
 				zoneWeight = bucket.Weight
 			} else if zoneWeight != bucket.Weight {
-				logger.Infof("found failure domains that have different weights")
+				log.NamespacedInfo(c.Namespace, logger, "found failure domains that have different weights")
 				return false, nil
 			}
 		}
@@ -483,7 +480,7 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 	if zoneCount > 2 {
 		return false, fmt.Errorf("cannot configure stretch cluster with more than 2 failure domains, and found %d of type %q", zoneCount, failureDomain)
 	}
-	logger.Infof("found two expected failure domains %q for the stretch cluster", failureDomain)
+	log.NamespacedInfo(c.Namespace, logger, "found two expected failure domains %q for the stretch cluster", failureDomain)
 	return true, nil
 }
 
@@ -492,11 +489,11 @@ func (c *Cluster) readyToConfigureArbiter(checkOSDPods bool) (bool, error) {
 //     to add a mon until we have reached the desired number of mons.
 //  2. To check that the majority of existing mons are in quorum. It is ok if not all mons are in quorum. (requireAllInQuorum = false)
 //     This is needed when the operator is restarted and all mons may not be up or in quorum.
-func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requireAllInQuorum bool) error {
+func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requireAllInQuorum bool, monsToSkipReconcile sets.Set[string]) error {
 	if requireAllInQuorum {
-		logger.Infof("creating mon %s", mons[i].DaemonName)
+		log.NamespacedInfo(c.Namespace, logger, "creating mon %s", mons[i].DaemonName)
 	} else {
-		logger.Info("checking for basic quorum with existing mons")
+		log.NamespacedInfo(c.Namespace, logger, "checking for basic quorum with existing mons")
 	}
 
 	// Calculate how many mons we expected to exist after this method is completed.
@@ -518,7 +515,7 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 	}
 
 	// Start the deployment
-	if err := c.startDeployments(mons[0:expectedMonCount], requireAllInQuorum); err != nil {
+	if err := c.startDeployments(mons[0:expectedMonCount], requireAllInQuorum, monsToSkipReconcile); err != nil {
 		return errors.Wrap(err, "failed to start mon pods")
 	}
 
@@ -609,7 +606,7 @@ func (c *Cluster) clusterInfoToMonConfigWithExclude(excludedMon string) []*monCo
 				isHostNetwork = true
 			}
 		}
-		logger.Debugf("Host network for mon %q is %t", monitor.Name, isHostNetwork)
+		log.NamespacedDebug(c.Namespace, logger, "Host network for mon %q is %t", monitor.Name, isHostNetwork)
 
 		mons = append(mons, &monConfig{
 			ResourceName:   resourceName(monitor.Name),
@@ -703,8 +700,15 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 	// to modify the storage by instead running an innocuous command.
 	d.Spec.Template.Spec.InitContainers = []corev1.Container{}
 	d.Spec.Template.Spec.Containers[0].Image = c.rookImage
-	d.Spec.Template.Spec.Containers[0].Command = []string{"sleep"} // sleep responds to signals so we don't need to wrap it
-	d.Spec.Template.Spec.Containers[0].Args = []string{"3600"}
+	// As PID 1, sleep will not capture the SIGTERM signal, so use a bash
+	// trap to exit cleanly and quickly when the pod is deleted.
+	d.Spec.Template.Spec.Containers[0].Command = []string{
+		"/bin/bash",
+		"-c",
+		`trap 'exit' SIGTERM
+         while true; do sleep 1; done`,
+	}
+
 	// remove the startup and liveness probes on the canary pod
 	d.Spec.Template.Spec.Containers[0].StartupProbe = nil
 	d.Spec.Template.Spec.Containers[0].LivenessProbe = nil
@@ -732,10 +736,10 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 
 		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(c.ClusterInfo.Context, pvc, metav1.CreateOptions{})
 		if err == nil {
-			logger.Infof("created canary monitor %s pvc %s", d.Name, pvc.Name)
+			log.NamespacedInfo(c.Namespace, logger, "created canary monitor %s pvc %s", d.Name, pvc.Name)
 		} else {
 			if kerrors.IsAlreadyExists(err) {
-				logger.Debugf("creating mon %s pvc %s: already exists.", d.Name, pvc.Name)
+				log.NamespacedDebug(c.Namespace, logger, "creating mon %s pvc %s: already exists.", d.Name, pvc.Name)
 			} else {
 				return nil, errors.Wrapf(err, "failed to create mon %s pvc %s", d.Name, pvc.Name)
 			}
@@ -756,13 +760,13 @@ func scheduleMonitor(c *Cluster, mon *monConfig) (*apps.Deployment, error) {
 		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(c.ClusterInfo.Context, d, metav1.CreateOptions{})
 		if err == nil {
 			createdDeployment = true
-			logger.Infof("created canary deployment %s", d.Name)
+			log.NamespacedInfo(c.Namespace, logger, "created canary deployment %s", d.Name)
 			break
 		} else if kerrors.IsAlreadyExists(err) {
 			if err := k8sutil.DeleteDeployment(c.ClusterInfo.Context, c.context.Clientset, c.Namespace, d.Name); err != nil {
 				return nil, errors.Wrapf(err, "failed to delete canary deployment %s", d.Name)
 			}
-			logger.Infof("deleted existing canary deployment %s", d.Name)
+			log.NamespacedInfo(c.Namespace, logger, "deleted existing canary deployment %s", d.Name)
 			time.Sleep(time.Second * canaryRetryDelaySeconds)
 		} else {
 			return nil, errors.Wrapf(err, "failed to create canary monitor deployment %s", d.Name)
@@ -817,13 +821,13 @@ func realWaitForMonitorScheduling(c *Cluster, d *apps.Deployment) (SchedulingRes
 		}
 
 		if len(pods.Items) == 0 {
-			logger.Infof("waiting for canary pod creation %s", d.Name)
+			log.NamespacedInfo(c.Namespace, logger, "waiting for canary pod creation %s", d.Name)
 			continue
 		}
 
 		pod := pods.Items[0]
 		if pod.Spec.NodeName == "" {
-			logger.Debugf("monitor %s canary pod %s not yet scheduled", d.Name, pod.Name)
+			log.NamespacedDebug(c.Namespace, logger, "monitor %s canary pod %s not yet scheduled", d.Name, pod.Name)
 			continue
 		}
 
@@ -833,7 +837,7 @@ func realWaitForMonitorScheduling(c *Cluster, d *apps.Deployment) (SchedulingRes
 		}
 
 		result.Node = node
-		logger.Infof("canary monitor deployment %s scheduled to %s", d.Name, node.Name)
+		log.NamespacedInfo(c.Namespace, logger, "canary monitor deployment %s scheduled to %s", d.Name, node.Name)
 		return result, nil
 	}
 
@@ -846,7 +850,7 @@ func (c *Cluster) initMonIPs(mons []*monConfig) error {
 			return c.ClusterInfo.Context.Err()
 		}
 		if m.UseHostNetwork {
-			logger.Infof("setting mon %q endpoints for hostnetwork mode", m.DaemonName)
+			log.NamespacedInfo(c.Namespace, logger, "setting mon %q endpoints for hostnetwork mode", m.DaemonName)
 			node, ok := c.mapping.Schedule[m.DaemonName]
 			if !ok || node == nil {
 				return errors.Errorf("failed to find node for mon %q in assignment map", m.DaemonName)
@@ -864,7 +868,7 @@ func (c *Cluster) initMonIPs(mons []*monConfig) error {
 					if err != nil {
 						return errors.Wrapf(err, "failed to export service %q", monService.Name)
 					}
-					logger.Infof("mon %q exported IP is %s", m.DaemonName, exportedIP)
+					log.NamespacedInfo(c.Namespace, logger, "mon %q exported IP is %s", m.DaemonName, exportedIP)
 					m.PublicIP = exportedIP
 				} else {
 					m.PublicIP = monService.Spec.ClusterIP
@@ -882,23 +886,20 @@ func (c *Cluster) initMonIPs(mons []*monConfig) error {
 func (c *Cluster) removeCanaryDeployments(labelSelector string) {
 	canaryDeployments, err := k8sutil.GetDeployments(c.ClusterInfo.Context, c.context.Clientset, c.Namespace, labelSelector)
 	if err != nil {
-		logger.Warningf("failed to get the list of monitor canary deployments. %v", err)
+		log.NamespacedWarning(c.Namespace, logger, "failed to get the list of monitor canary deployments. %v", err)
 		return
 	}
 
-	// Delete the canary mons, but don't wait for them to exit
+	// Delete the canary mons
 	for _, canary := range canaryDeployments.Items {
-		logger.Infof("cleaning up canary monitor deployment %q", canary.Name)
-		var gracePeriod int64
-		propagation := metav1.DeletePropagationForeground
-		options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
-		if err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Delete(c.ClusterInfo.Context, canary.Name, *options); err != nil {
-			logger.Warningf("failed to delete canary monitor deployment %q. %v", canary.Name, err)
+		log.NamespacedInfo(c.Namespace, logger, "cleaning up canary monitor deployment %q", canary.Name)
+		if err := k8sutil.DeleteDeployment(c.ClusterInfo.Context, c.context.Clientset, c.Namespace, canary.Name); err != nil {
+			log.NamespacedWarning(c.Namespace, logger, "failed to delete canary monitor deployment %q. %v", canary.Name, err)
 		}
 	}
 }
 
-func (c *Cluster) assignMons(mons []*monConfig) error {
+func (c *Cluster) assignMons(mons []*monConfig, monsToSkipReconcile sets.Set[string]) error {
 	// when monitors are scheduling below by invoking scheduleMonitor() a canary
 	// deployment and optional canary PVC are created. In order for the
 	// anti-affinity rules to be effective, we leave the canary pods in place
@@ -925,7 +926,12 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 		}
 		// scheduling for this monitor has already been completed
 		if _, ok := c.mapping.Schedule[mon.DaemonName]; ok {
-			logger.Debugf("mon %s already scheduled", mon.DaemonName)
+			log.NamespacedDebug(c.Namespace, logger, "mon %s already scheduled", mon.DaemonName)
+			continue
+		}
+		// skip the mon if it is marked to skip reconcile
+		if monsToSkipReconcile.Has(mon.DaemonName) {
+			log.NamespacedInfo(c.Namespace, logger, "skipping scheduling for mon %q since marked to skip reconcile", mon.DaemonName)
 			continue
 		}
 
@@ -947,14 +953,14 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 
 			result, err := waitForMonitorScheduling(c, deployment)
 			if err != nil {
-				logger.Errorf("failed to schedule mon %q. %v", mon.DaemonName, err)
+				log.NamespacedError(c.Namespace, logger, "failed to schedule mon %q. %v", mon.DaemonName, err)
 				failedMonSchedule = true
 				return
 			}
 
 			nodeChoice := result.Node
 			if nodeChoice == nil {
-				logger.Errorf("failed to schedule monitor %q", mon.DaemonName)
+				log.NamespacedError(c.Namespace, logger, "failed to schedule monitor %q", mon.DaemonName)
 				failedMonSchedule = true
 				return
 			}
@@ -964,21 +970,21 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 			// directly to a node selector on the monitor pod.
 			var schedule *controller.MonScheduleInfo
 			if c.spec.Network.IsHost() || c.monVolumeClaimTemplate(mon) == nil {
-				logger.Infof("mon %s assigned to node %s", mon.DaemonName, nodeChoice.Name)
+				log.NamespacedInfo(c.Namespace, logger, "mon %s assigned to node %s", mon.DaemonName, nodeChoice.Name)
 				schedule, err = getNodeInfoFromNode(*nodeChoice)
 				if err != nil {
-					logger.Errorf("failed to get node info for node %q. %v", nodeChoice.Name, err)
+					log.NamespacedError(c.Namespace, logger, "failed to get node info for node %q. %v", nodeChoice.Name, err)
 					failedMonSchedule = true
 					return
 				}
 			} else {
-				logger.Infof("mon %q placement using native scheduler", mon.DaemonName)
+				log.NamespacedInfo(c.Namespace, logger, "mon %q placement using native scheduler", mon.DaemonName)
 			}
 			if c.spec.ZonesRequired() {
 				if schedule == nil {
 					schedule = &controller.MonScheduleInfo{}
 				}
-				logger.Infof("mon %q is assigned to zone %q", mon.DaemonName, mon.Zone)
+				log.NamespacedInfo(c.Namespace, logger, "mon %q is assigned to zone %q", mon.DaemonName, mon.Zone)
 				schedule.Zone = mon.Zone
 			}
 
@@ -994,7 +1000,7 @@ func (c *Cluster) assignMons(mons []*monConfig) error {
 		return errors.New("failed to schedule mons")
 	}
 
-	logger.Debug("mons have been scheduled")
+	log.NamespacedDebug(c.Namespace, logger, "mons have been scheduled")
 	return nil
 }
 
@@ -1023,7 +1029,7 @@ func (c *Cluster) monVolumeClaimTemplate(mon *monConfig) *corev1.PersistentVolum
 	return c.spec.Mon.VolumeClaimTemplate.ToPVC()
 }
 
-func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) error {
+func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool, monsToSkipDeployment sets.Set[string]) error {
 	if len(mons) == 0 {
 		return errors.New("cannot start 0 mons")
 	}
@@ -1036,10 +1042,10 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	deployments, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).List(c.ClusterInfo.Context, metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", AppName)})
 	if err != nil {
 		if kerrors.IsNotFound(err) {
-			logger.Infof("0 of %d expected mon deployments exist. creating new deployment(s).", len(mons))
+			log.NamespacedInfo(c.Namespace, logger, "0 of %d expected mon deployments exist. creating new deployment(s).", len(mons))
 			onlyCheckQuorumOnce = true
 		} else {
-			logger.Warningf("failed to list mon deployments. attempting to continue. %v", err)
+			log.NamespacedWarning(c.Namespace, logger, "failed to list mon deployments. attempting to continue. %v", err)
 		}
 	}
 
@@ -1051,15 +1057,20 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 		}
 	}
 	if len(deployments.Items) < len(mons) {
-		logger.Infof("%d of %d expected mon deployments exist. creating new deployment(s).", len(deployments.Items), len(mons))
+		log.NamespacedInfo(c.Namespace, logger, "%d of %d expected mon deployments exist. creating new deployment(s).", len(deployments.Items), len(mons))
 		onlyCheckQuorumOnce = true
 	} else if readyReplicas == 0 {
-		logger.Infof("%d of %d expected mons are ready. creating or updating deployments without checking quorum in attempt to achieve a healthy mon cluster", readyReplicas, len(mons))
+		log.NamespacedInfo(c.Namespace, logger, "%d of %d expected mons are ready. creating or updating deployments without checking quorum in attempt to achieve a healthy mon cluster", readyReplicas, len(mons))
 		onlyCheckQuorumOnce = true
 	}
 
 	// Ensure each of the mons have been created. If already created, it will be a no-op.
 	for i := 0; i < len(mons); i++ {
+		if monsToSkipDeployment.Has(mons[i].DaemonName) {
+			log.NamespacedInfo(c.Namespace, logger, "skipping starting deployment for mon %q since marked to skip reconcile", mons[i].DaemonName)
+			continue
+		}
+
 		schedule := c.mapping.Schedule[mons[i].DaemonName]
 		err := c.startMon(mons[i], schedule)
 		if err != nil {
@@ -1072,7 +1083,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 			// we need to do everything possible to verify the basic health of a cluster, complete the first orchestration,
 			// and start watching for all the CRs. If mons still have quorum we can continue with the orchestration even
 			// if they aren't all up.
-			logger.Errorf("attempting to continue after failing to start mon %q. %v", mons[i].DaemonName, err)
+			log.NamespacedError(c.Namespace, logger, "attempting to continue after failing to start mon %q. %v", mons[i].DaemonName, err)
 		}
 
 		// For the initial deployment (first creation) it's expected to not have all the monitors in quorum
@@ -1087,13 +1098,13 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 		}
 	}
 
-	logger.Infof("mons created: %d", len(mons))
+	log.NamespacedInfo(c.Namespace, logger, "mons created: %d", len(mons))
 	// Final verification that **all** mons are in quorum
 	// Do not proceed if one monitor is still syncing
 	// Only do this when monitors versions are different so we don't block the orchestration if a mon is down.
 	versions, err := cephclient.GetAllCephDaemonVersions(c.context, c.ClusterInfo)
 	if err != nil {
-		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %v", err)
+		log.NamespacedWarning(c.Namespace, logger, "failed to get ceph daemons versions; this likely means there is no cluster yet. %v", err)
 	} else {
 		if len(versions.Mon) != 1 {
 			requireAllInQuorum = true
@@ -1109,20 +1120,20 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 func (c *Cluster) checkForExtraMonResources(mons []*monConfig, deployments []apps.Deployment) string {
 	// If there are fewer mon deployments than the desired count, no need to remove an extra.
 	if len(deployments) <= c.spec.Mon.Count || len(deployments) <= len(mons) {
-		logger.Debug("no extra mon deployments to remove")
+		log.NamespacedDebug(c.Namespace, logger, "no extra mon deployments to remove")
 		return ""
 	}
 	// If there are fewer mons in the list than expected, either new mons are being created for
 	// a new cluster, or a mon failover is in progress and the list of mons only
 	// includes the single mon that was just started
 	if len(mons) < c.spec.Mon.Count {
-		logger.Debug("new cluster or mon failover in progress, not checking for extra mon deployments")
+		log.NamespacedDebug(c.Namespace, logger, "new cluster or mon failover in progress, not checking for extra mon deployments")
 		return ""
 	}
 
 	// If there are more deployments than expected mons from the ceph quorum,
 	// find the extra mon deployment and clean it up.
-	logger.Infof("there is an extra mon deployment that is not needed and not in quorum")
+	log.NamespacedInfo(c.Namespace, logger, "there is an extra mon deployment that is not needed and not in quorum")
 	for _, deploy := range deployments {
 		monName := deploy.Labels[controller.DaemonIDLabel]
 		found := false
@@ -1134,7 +1145,7 @@ func (c *Cluster) checkForExtraMonResources(mons []*monConfig, deployments []app
 			}
 		}
 		if !found {
-			logger.Infof("deleting extra mon deployment %q", deploy.Name)
+			log.NamespacedInfo(c.Namespace, logger, "deleting extra mon deployment %q", deploy.Name)
 			c.removeMonResources(monName)
 			return monName
 		}
@@ -1223,7 +1234,7 @@ func (c *Cluster) persistExpectedMonDaemonsAsEndpointSlice() error {
 		// Theoretically, we could now go ahead with the normal code path to
 		// delete (both IPv4 and IPv6) EndpointSlices, but 0 mons is certainly
 		// an error state, so it's better to do nothing destructive right now.
-		logger.Debug("no mon addresses found, skipping endpointslice resource reconciliation")
+		log.NamespacedDebug(c.Namespace, logger, "no mon addresses found, skipping endpointslice resource reconciliation")
 		return nil
 	}
 
@@ -1237,7 +1248,7 @@ func (c *Cluster) persistExpectedMonDaemonsAsEndpointSlice() error {
 		}
 		ip := net.ParseIP(host)
 		if ip == nil {
-			logger.Warningf("invalid IP parsed from mon endpoint: %s", mon.Endpoint)
+			log.NamespacedWarning(c.Namespace, logger, "invalid IP parsed from mon endpoint: %s", mon.Endpoint)
 			continue
 		}
 		if ip.To4() != nil {
@@ -1267,12 +1278,12 @@ func (c *Cluster) createEndpointSliceForAddresses(addresses []string, addressTyp
 	}
 
 	if len(addresses) == 0 {
-		logger.Debugf("no %s addresses found, deleting existing %q endpointslice if exists", addressType, sliceName)
+		log.NamespacedDebug(c.Namespace, logger, "no %s addresses found, deleting existing %q endpointslice if exists", addressType, sliceName)
 		if err := client.Delete(c.ClusterInfo.Context, sliceName, metav1.DeleteOptions{}); err != nil {
 			if kerrors.IsNotFound(err) {
-				logger.Debugf("endpointslice %q not found, nothing to delete", sliceName)
+				log.NamespacedDebug(c.Namespace, logger, "endpointslice %q not found, nothing to delete", sliceName)
 			} else {
-				logger.Errorf("failed to delete endpointslice %q: %v", sliceName, err)
+				log.NamespacedError(c.Namespace, logger, "failed to delete endpointslice %q: %v", sliceName, err)
 			}
 		}
 		return nil
@@ -1320,13 +1331,13 @@ func (c *Cluster) createEndpointSliceForAddresses(addresses []string, addressTyp
 			return errors.Wrapf(err, "failed to create %s endpointslice", addressType)
 		}
 
-		logger.Debugf("updating existing %s endpointslice %s", addressType, sliceName)
+		log.NamespacedDebug(c.Namespace, logger, "updating existing %s endpointslice %s", addressType, sliceName)
 		if _, err = client.Update(c.ClusterInfo.Context, endpointSlice, metav1.UpdateOptions{}); err != nil {
 			return errors.Wrapf(err, "failed to update %s endpointslice", addressType)
 		}
 	}
 
-	logger.Infof("created/updated %s endpointslice with addresses: %+v", addressType, addresses)
+	log.NamespacedInfo(c.Namespace, logger, "created/updated %s endpointslice with addresses: %+v", addressType, addresses)
 	return nil
 }
 
@@ -1393,12 +1404,12 @@ func (c *Cluster) persistExpectedMonDaemonsInConfigMap() error {
 			return errors.Wrap(err, "failed to create mon endpoint config map")
 		}
 
-		logger.Debugf("updating config map %s that already exists", configMap.Name)
+		log.NamespacedDebug(c.Namespace, logger, "updating config map %s that already exists", configMap.Name)
 		if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(c.ClusterInfo.Context, configMap, metav1.UpdateOptions{}); err != nil {
 			return errors.Wrap(err, "failed to update mon endpoint config map")
 		}
 	}
-	logger.Infof("saved mon endpoints to config map %+v", configMap.Data)
+	log.NamespacedInfo(c.Namespace, logger, "saved mon endpoints to config map %+v", configMap.Data)
 	return nil
 }
 
@@ -1416,7 +1427,7 @@ func (c *Cluster) getStoredMaxMonID() (string, error) {
 	// if the configmap cannot be loaded, assume a new cluster. If the mons have previously
 	// been created, the maxMonID will anyway analyze them to ensure the index is correct
 	// even if this error occurs.
-	logger.Infof("existing maxMonID not found or failed to load. %v", err)
+	log.NamespacedInfo(c.Namespace, logger, "existing maxMonID not found or failed to load. %v", err)
 	return "-1", nil
 }
 
@@ -1442,11 +1453,11 @@ func (c *Cluster) commitMaxMonIDRequireIncrementing(desiredMaxMonID int, require
 	}
 
 	if requireIncrementing && existingMax >= desiredMaxMonID {
-		logger.Infof("no need to commit maxMonID %d since it is not greater than existing maxMonID %d", desiredMaxMonID, existingMax)
+		log.NamespacedInfo(c.Namespace, logger, "no need to commit maxMonID %d since it is not greater than existing maxMonID %d", desiredMaxMonID, existingMax)
 		return nil
 	}
 
-	logger.Infof("updating maxMonID from %d to %d", existingMax, desiredMaxMonID)
+	log.NamespacedInfo(c.Namespace, logger, "updating maxMonID from %d to %d", existingMax, desiredMaxMonID)
 	configmap.Data[controller.MaxMonIDKey] = strconv.Itoa(desiredMaxMonID)
 
 	if _, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Update(c.ClusterInfo.Context, configmap, metav1.UpdateOptions{}); err != nil {
@@ -1472,7 +1483,7 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 		_ = k8sutil.ExpandPVCIfRequired(c.ClusterInfo.Context, c.context.Client, desiredPvc, existingPvc)
 	}
 
-	logger.Infof("deployment for mon %s already exists. updating if needed",
+	log.NamespacedInfo(c.Namespace, logger, "deployment for mon %s already exists. updating if needed",
 		d.Name)
 
 	err := updateDeploymentAndWait(c.context, c.ClusterInfo, d, config.MonType, m.DaemonName, c.spec.SkipUpgradeChecks, false)
@@ -1515,6 +1526,7 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 func (c *Cluster) startMon(m *monConfig, schedule *controller.MonScheduleInfo) error {
 	// check if the monitor deployment already exists. if the deployment does
 	// exist, also determine if it using pvc storage.
+	log.NamespacedInfo(c.Namespace, logger, "starting mon %q", m.DaemonName)
 	pvcExists := false
 	deploymentExists := false
 
@@ -1550,10 +1562,10 @@ func (c *Cluster) startMon(m *monConfig, schedule *controller.MonScheduleInfo) e
 		pvcName := m.ResourceName
 		d.Spec.Template.Spec.Volumes = append(d.Spec.Template.Spec.Volumes, controller.DaemonVolumesDataPVC(pvcName))
 		controller.AddVolumeMountSubPath(&d.Spec.Template.Spec, "ceph-daemon-data")
-		logger.Debugf("adding pvc volume source %s to mon deployment %s", pvcName, d.Name)
+		log.NamespacedDebug(c.Namespace, logger, "adding pvc volume source %s to mon deployment %s", pvcName, d.Name)
 	} else {
 		d.Spec.Template.Spec.Volumes = append(d.Spec.Template.Spec.Volumes, controller.DaemonVolumesDataHostPath(m.DataPathMap)...)
-		logger.Debugf("adding host path volume source to mon deployment %s", d.Name)
+		log.NamespacedDebug(c.Namespace, logger, "adding host path volume source to mon deployment %s", d.Name)
 	}
 
 	// placement settings from the CRD
@@ -1607,7 +1619,7 @@ func (c *Cluster) startMon(m *monConfig, schedule *controller.MonScheduleInfo) e
 		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(c.ClusterInfo.Context, pvc, metav1.CreateOptions{})
 		if err != nil {
 			if kerrors.IsAlreadyExists(err) {
-				logger.Debugf("cannot create mon %s pvc %s: already exists.", d.Name, pvc.Name)
+				log.NamespacedDebug(c.Namespace, logger, "cannot create mon %s pvc %s: already exists.", d.Name, pvc.Name)
 			} else {
 				return errors.Wrapf(err, "failed to create mon %s pvc %s", d.Name, pvc.Name)
 			}
@@ -1627,7 +1639,7 @@ func (c *Cluster) startMon(m *monConfig, schedule *controller.MonScheduleInfo) e
 	k8sutil.SetNodeAntiAffinityForPod(&d.Spec.Template.Spec, requiredDuringScheduling(&c.spec), k8sutil.LabelHostname(),
 		map[string]string{k8sutil.AppAttr: AppName}, nodeSelector)
 
-	logger.Debugf("Starting mon: %+v", d.Name)
+	log.NamespacedDebug(c.Namespace, logger, "Starting mon: %+v", d.Name)
 	_, err = c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(c.ClusterInfo.Context, d, metav1.CreateOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "failed to create mon deployment %s", d.Name)
@@ -1663,10 +1675,10 @@ func isMonIPUpdateRequiredForHostNetwork(mon string, isMonUsingHostNetwork bool,
 
 func hasMonPathChanged(d *apps.Deployment, claim *corev1.PersistentVolumeClaim) bool {
 	if d.Labels["pvc_name"] == "" && claim != nil {
-		logger.Infof("skipping update for mon %q where path has changed from hostPath to pvc", d.Name)
+		log.NamespacedInfo(d.Namespace, logger, "skipping update for mon %q where path has changed from hostPath to pvc", d.Name)
 		return true
 	} else if d.Labels["pvc_name"] != "" && claim == nil {
-		logger.Infof("skipping update for mon %q where path has changed from pvc to hostPath", d.Name)
+		log.NamespacedInfo(d.Namespace, logger, "skipping update for mon %q where path has changed from pvc to hostPath", d.Name)
 		return true
 	}
 
@@ -1674,7 +1686,7 @@ func hasMonPathChanged(d *apps.Deployment, claim *corev1.PersistentVolumeClaim) 
 }
 
 func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.ClusterInfo, mons []string, sleepTime int, requireAllInQuorum bool) error {
-	logger.Infof("waiting for mon quorum with %v", mons)
+	log.NamespacedInfo(clusterInfo.Namespace, logger, "waiting for mon quorum with %v", mons)
 
 	// wait for monitors to establish quorum
 	retryCount := 0
@@ -1701,18 +1713,18 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 		for _, m := range mons {
 			running, err := k8sutil.PodsRunningWithLabel(clusterInfo.Context, context.Clientset, clusterInfo.Namespace, fmt.Sprintf("app=%s,mon=%s", AppName, m))
 			if err != nil {
-				logger.Infof("failed to query mon pod status, trying again. %v", err)
+				log.NamespacedInfo(clusterInfo.Namespace, logger, "failed to query mon pod status, trying again. %v", err)
 				continue
 			}
 			if running > 0 {
 				runningMonNames = append(runningMonNames, m)
 			} else {
 				allPodsRunning = false
-				logger.Infof("mon %s is not yet running", m)
+				log.NamespacedInfo(clusterInfo.Namespace, logger, "mon %s is not yet running", m)
 			}
 		}
 
-		logger.Infof("mons running: %v", runningMonNames)
+		log.NamespacedInfo(clusterInfo.Namespace, logger, "mons running: %v", runningMonNames)
 		if !allPodsRunning && requireAllInQuorum {
 			continue
 		}
@@ -1721,12 +1733,12 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 		// their quorum status
 		monQuorumStatusResp, err := cephclient.GetMonQuorumStatus(context, clusterInfo)
 		if err != nil {
-			logger.Debugf("failed to get quorum_status. %v", err)
+			log.NamespacedDebug(clusterInfo.Namespace, logger, "failed to get quorum_status. %v", err)
 			continue
 		}
 
 		if !requireAllInQuorum {
-			logQuorumMembers(monQuorumStatusResp)
+			logQuorumMembers(clusterInfo.Namespace, monQuorumStatusResp)
 			break
 		}
 
@@ -1735,14 +1747,14 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 		for _, name := range mons {
 			if !monFoundInQuorum(name, monQuorumStatusResp) {
 				// found an initial monitor that is not in quorum, bail out of this retry
-				logger.Warningf("monitor %s is not in quorum list", name)
+				log.NamespacedWarning(clusterInfo.Namespace, logger, "monitor %s is not in quorum list", name)
 				allInQuorum = false
 				break
 			}
 		}
 
 		if allInQuorum {
-			logQuorumMembers(monQuorumStatusResp)
+			logQuorumMembers(clusterInfo.Namespace, monQuorumStatusResp)
 			break
 		}
 	}
@@ -1750,14 +1762,14 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterInfo *cephclient.Cl
 	return nil
 }
 
-func logQuorumMembers(monQuorumStatusResp cephclient.MonStatusResponse) {
+func logQuorumMembers(namespace string, monQuorumStatusResp cephclient.MonStatusResponse) {
 	var monsInQuorum []string
 	for _, m := range monQuorumStatusResp.MonMap.Mons {
 		if monFoundInQuorum(m.Name, monQuorumStatusResp) {
 			monsInQuorum = append(monsInQuorum, m.Name)
 		}
 	}
-	logger.Infof("Monitors in quorum: %v", monsInQuorum)
+	log.NamespacedInfo(namespace, logger, "Monitors in quorum: %v", monsInQuorum)
 }
 
 func monFoundInQuorum(name string, monQuorumStatusResp cephclient.MonStatusResponse) bool {
@@ -1792,14 +1804,14 @@ func requiredDuringScheduling(spec *cephv1.ClusterSpec) bool {
 }
 
 func (c *Cluster) acquireOrchestrationLock() {
-	logger.Debugf("Acquiring lock for mon orchestration")
+	log.NamespacedDebug(c.Namespace, logger, "Acquiring lock for mon orchestration")
 	c.orchestrationMutex.Lock()
-	logger.Debugf("Acquired lock for mon orchestration")
+	log.NamespacedDebug(c.Namespace, logger, "Acquired lock for mon orchestration")
 }
 
 func (c *Cluster) releaseOrchestrationLock() {
 	c.orchestrationMutex.Unlock()
-	logger.Debugf("Released lock for mon orchestration")
+	log.NamespacedDebug(c.Namespace, logger, "Released lock for mon orchestration")
 }
 
 func (c *Cluster) RotateMonCephxKeys(clusterObj *cephv1.CephCluster) (bool, error) {
@@ -1813,16 +1825,16 @@ func (c *Cluster) RotateMonCephxKeys(clusterObj *cephv1.CephCluster) (bool, erro
 	}
 
 	if !shouldRotateMonKeys {
-		logger.Debugf("cephx key rotation for mon daemon in the namespace %q is not required", c.ClusterInfo.Namespace)
+		log.NamespacedDebug(c.Namespace, logger, "cephx key rotation for mon daemon in the namespace %q is not required", c.ClusterInfo.Namespace)
 		return shouldRotateMonKeys, nil
 	}
 
 	if !c.ClusterInfo.CephVersion.IsAtLeast(keyring.CephAuthMonRotateSupportedVersion) {
-		logger.Debugf("cephx key rotation for mons in namespace %q is indicated, but ceph version %#v does not support mon key rotation", c.Namespace, c.ClusterInfo.CephVersion)
+		log.NamespacedDebug(c.Namespace, logger, "cephx key rotation for mons in namespace %q is indicated, but ceph version %#v does not support mon key rotation", c.Namespace, c.ClusterInfo.CephVersion)
 		return false, nil
 	}
 
-	logger.Infof("cephx keys for mon daemons in the namespace %q will be rotated", c.ClusterInfo.Namespace)
+	log.NamespacedInfo(c.Namespace, logger, "cephx keys for mon daemons in the namespace %q will be rotated", c.ClusterInfo.Namespace)
 
 	k := keyring.GetSecretStore(c.context, c.ClusterInfo, c.ClusterInfo.OwnerInfo)
 	newKey, err := k.RotateKey(controller.MonCephxUser)
@@ -1843,7 +1855,7 @@ func (c *Cluster) RotateMonCephxKeys(clusterObj *cephv1.CephCluster) (bool, erro
 		return shouldRotateMonKeys, errors.Wrapf(err, "failed to save mon keyring secret after rotating the mon cephx keys in the namespace %q", c.ClusterInfo.Namespace)
 	}
 
-	logger.Infof("successfully rotated cephx keys for mon daemons in the namespace %q", c.ClusterInfo.Namespace)
+	log.NamespacedInfo(c.Namespace, logger, "successfully rotated cephx keys for mon daemons in the namespace %q", c.ClusterInfo.Namespace)
 
 	return shouldRotateMonKeys, nil
 }
@@ -1856,11 +1868,11 @@ func (c *Cluster) UpdateMonCephxStatus(didRotate bool) error {
 		}
 		updatedStatus := keyring.UpdatedCephxStatus(didRotate, cluster.Spec.Security.CephX.Daemon, c.ClusterInfo.CephVersion, cluster.Status.Cephx.Mon)
 		cluster.Status.Cephx.Mon = updatedStatus
-		logger.Debugf("updating mon daemon cephx status to %+v", cluster.Status.Cephx.Mgr)
+		log.NamespacedDebug(c.Namespace, logger, "updating mon daemon cephx status to %+v", cluster.Status.Cephx.Mgr)
 		if err := reporting.UpdateStatus(c.context.Client, cluster); err != nil {
 			return errors.Wrapf(err, "failed to update cluster cephx status for mon daemon in the namespace %q", c.ClusterInfo.Namespace)
 		}
-		logger.Infof("successfully updated the cephx status for mon daemon in the namespace %q", c.ClusterInfo.Namespace)
+		log.NamespacedInfo(c.Namespace, logger, "successfully updated the cephx status for mon daemon in the namespace %q", c.ClusterInfo.Namespace)
 
 		return nil
 	})

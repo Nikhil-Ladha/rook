@@ -854,6 +854,9 @@ type MgrSpec struct {
 	// +optional
 	// +nullable
 	Modules []Module `json:"modules,omitempty"`
+	// Whether host networking is enabled for the Ceph Mgr. If not set, the network settings from CephCluster.spec.networking will be applied.
+	// +optional
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
 }
 
 // Module represents mgr modules that the user wants to enable or disable
@@ -948,8 +951,9 @@ type PoolSpec struct {
 	DeviceClass string `json:"deviceClass,omitempty"`
 
 	// Allow rook operator to change the pool CRUSH tunables once the pool is created
+	// +nullable
 	// +optional
-	EnableCrushUpdates bool `json:"enableCrushUpdates,omitempty"`
+	EnableCrushUpdates *bool `json:"enableCrushUpdates,omitempty"`
 
 	// DEPRECATED: use Parameters instead, e.g., Parameters["compression_mode"] = "force"
 	// The inline compression mode in Bluestore OSD to set to (options are: none, passive, aggressive, force)
@@ -1447,6 +1451,22 @@ type MetadataServerSpec struct {
 
 	// +optional
 	StartupProbe *ProbeSpec `json:"startupProbe,omitempty"`
+
+	// CacheMemoryLimitFactor is the factor applied to the memory limit to determine the MDS cache memory limit.
+	// MDS cache memory limit should be set to 50-60% of RAM reserved for the MDS container.
+	// MDS uses approximately 125% of the value of mds_cache_memory_limit in RAM.
+	// This factor is applied when resources.limits.memory is set.
+	// +kubebuilder:validation:Minimum=0.0
+	// +kubebuilder:validation:Maximum=1.0
+	// +optional
+	CacheMemoryLimitFactor *float64 `json:"cacheMemoryLimitFactor,omitempty"`
+
+	// CacheMemoryRequestFactor is the factor applied to the memory request to determine the MDS cache memory limit.
+	// This factor is applied when resources.requests.memory is set and resources.limits.memory is not set.
+	// +kubebuilder:validation:Minimum=0.0
+	// +kubebuilder:validation:Maximum=1.0
+	// +optional
+	CacheMemoryRequestFactor *float64 `json:"cacheMemoryRequestFactor,omitempty"`
 }
 
 // FSMirroringSpec represents the setting for a mirrored filesystem
@@ -1655,6 +1675,7 @@ type PeerStatSpec struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=cephos
+// +kubebuilder:subresource:scale:specpath=.spec.gateway.instances,statuspath=.status.replicas,selectorpath=.status.selector
 type CephObjectStore struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
@@ -2108,6 +2129,10 @@ type ZoneSpec struct {
 // ObjectStoreStatus represents the status of a Ceph Object Store resource
 type ObjectStoreStatus struct {
 	// +optional
+	Replicas int32 `json:"replicas"`
+	// +optional
+	Selector string `json:"selector"`
+	// +optional
 	Phase ConditionType `json:"phase,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -2227,7 +2252,7 @@ type ObjectStoreUserSpec struct {
 	// The store the user will be created in
 	// +optional
 	Store string `json:"store,omitempty"`
-	// The display name for the ceph users
+	// The display name for the ceph user.
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
 	// +optional
@@ -2344,6 +2369,8 @@ type ObjectUserKey struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CephObjectRealm represents a Ceph Object Store Gateway Realm
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=cephor
 type CephObjectRealm struct {
@@ -2408,7 +2435,7 @@ type CephObjectZoneGroupList struct {
 
 // ObjectZoneGroupSpec represent the spec of an ObjectZoneGroup
 type ObjectZoneGroupSpec struct {
-	// The display name for the ceph users
+	// The name of the realm the zone group is a member of.
 	Realm string `json:"realm"`
 }
 
@@ -2440,7 +2467,7 @@ type CephObjectZoneList struct {
 
 // ObjectZoneSpec represent the spec of an ObjectZone
 type ObjectZoneSpec struct {
-	// The display name for the ceph users
+	// The name of the zone group the zone is a member of.
 	ZoneGroup string `json:"zoneGroup"`
 
 	// The metadata pool settings
@@ -2615,6 +2642,8 @@ type KafkaEndpointSpec struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // CephBucketNotification represents a Bucket Notifications
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=cephbn
 type CephBucketNotification struct {
@@ -2635,7 +2664,8 @@ type CephBucketNotificationList struct {
 }
 
 // BucketNotificationSpec represent the event type of the bucket notification
-// +kubebuilder:validation:Enum="s3:ObjectCreated:*";"s3:ObjectCreated:Put";"s3:ObjectCreated:Post";"s3:ObjectCreated:Copy";"s3:ObjectCreated:CompleteMultipartUpload";"s3:ObjectRemoved:*";"s3:ObjectRemoved:Delete";"s3:ObjectRemoved:DeleteMarkerCreated"
+// See: https://docs.ceph.com/en/latest/radosgw/s3-notification-compatibility/#event-types
+// +kubebuilder:validation:Enum="s3:ObjectCreated:*";"s3:ObjectCreated:Put";"s3:ObjectCreated:Post";"s3:ObjectCreated:Copy";"s3:ObjectCreated:CompleteMultipartUpload";"s3:ObjectRemoved:*";"s3:ObjectRemoved:Delete";"s3:ObjectRemoved:DeleteMarkerCreated";"s3:ObjectLifecycle:Expiration:Current";"s3:ObjectLifecycle:Expiration:NonCurrent";"s3:ObjectLifecycle:Expiration:DeleteMarker";"s3:ObjectLifecycle:Expiration:AbortMultipartUpload";"s3:ObjectLifecycle:Transition:Current";"s3:ObjectLifecycle:Transition:NonCurrent";"s3:LifecycleExpiration:*";"s3:LifecycleExpiration:Delete";"s3:LifecycleExpiration:DeleteMarkerCreated";"s3:LifecycleTransition";"s3:ObjectSynced:*";"s3:ObjectSynced:Create";"s3:ObjectSynced:Delete";"s3:ObjectSynced:DeletionMarkerCreated";"s3:Replication:*";"s3:Replication:Create";"s3:Replication:Delete";"s3:Replication:DeletionMarkerCreated";"s3:ObjectRestore:*";"s3:ObjectRestore:Post";"s3:ObjectRestore:Completed";"s3:ObjectRestore:Delete"
 type BucketNotificationEvent string
 
 // BucketNotificationSpec represent the spec of a Bucket Notification
@@ -2696,6 +2726,8 @@ type RGWServiceSpec struct {
 
 // CephNFS represents a Ceph NFS
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:subresource:status
 type CephNFS struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -3460,6 +3492,10 @@ type StorageScopeSpec struct {
 	// The default is false since data rebalancing can cause temporary cluster slowdown.
 	// +optional
 	AllowOsdCrushWeightUpdate bool `json:"allowOsdCrushWeightUpdate,omitempty"`
+	// The maximum number of OSDs to update in parallel.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	OSDMaxUpdatesInParallel uint32 `json:"osdMaxUpdatesInParallel,omitempty"`
 }
 
 // Migration handles the OSD migration
@@ -3893,3 +3929,125 @@ const (
 	// Always means the Ceph COSI driver will be deployed even if the object store is not present
 	COSIDeploymentStrategyAlways COSIDeploymentStrategy = "Always"
 )
+
+// +genclient
+// +genclient:noStatus
+// +kubebuilder:resource:shortName=nvmeof,path=cephnvmeofgateways
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:subresource:status
+//
+// CephNVMeOFGateway represents a Ceph NVMe-oF Gateway
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CephNVMeOFGateway struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata"`
+	Spec              NVMeOFGatewaySpec `json:"spec"`
+	// +optional
+	Status *NVMeOFGatewayStatus `json:"status,omitempty"`
+}
+
+// NVMeOFGatewayStatus represents the status of Ceph NVMe-oF Gateway
+type NVMeOFGatewayStatus struct {
+	Status `json:",inline"`
+	Cephx  LocalCephxStatus `json:"cephx,omitempty"`
+}
+
+// CephNVMeOFGatewayList represents a list of Ceph NVMe-oF Gateways
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type CephNVMeOFGatewayList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+	Items           []CephNVMeOFGateway `json:"items"`
+}
+
+// NVMeOFGatewaySpec represents the spec of an NVMe-oF gateway
+type NVMeOFGatewaySpec struct {
+	// Image is the container image to use for the NVMe-oF gateway daemon.
+	// For example, quay.io/ceph/nvmeof:1.5
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// The number of active gateway instances
+	// +kubebuilder:validation:Minimum=1
+	Instances int `json:"instances"`
+
+	// Pool is the RADOS pool where NVMe-oF configuration is stored
+	// +kubebuilder:validation:MinLength=1
+	Pool string `json:"pool"`
+
+	// Group is the gateway group name for high availability (ANA group)
+	// +kubebuilder:validation:MinLength=1
+	Group string `json:"group"`
+
+	// ConfigMapRef is the name of the ConfigMap containing nvmeof.conf configuration
+	// If not specified, a default configuration will be generated
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ConfigMapRef string `json:"configMapRef,omitempty"`
+
+	// NVMeOFConfig is a map of section names to key-value pairs for nvmeof.conf configuration
+	// This allows users to override or add configuration options without needing to manage a ConfigMap
+	// +optional
+	NVMeOFConfig map[string]map[string]string `json:"nvmeofConfig,omitempty"`
+
+	// The affinity to place the gateway pods
+	// +optional
+	Placement Placement `json:"placement,omitempty"`
+
+	// The annotations-related configuration to add/set on each Pod related object.
+	// +optional
+	Annotations Annotations `json:"annotations,omitempty"`
+
+	// The labels-related configuration to add/set on each Pod related object.
+	// +optional
+	Labels Labels `json:"labels,omitempty"`
+
+	// Resources set resource requests and limits
+	// +optional
+	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+
+	// PriorityClassName sets the priority class on the pods
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// Whether host networking is enabled for the gateway. If not set, the network settings from the cluster CR will be applied.
+	// +optional
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// Ports configuration for the NVMe-oF gateway
+	// +optional
+	Ports *NVMeOFGatewayPorts `json:"ports,omitempty"`
+
+	// A liveness-probe to verify that gateway has valid run-time state.
+	// If LivenessProbe.Disabled is false and LivenessProbe.Probe is nil uses default probe.
+	// +optional
+	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
+}
+
+// NVMeOFGatewayPorts represents the port configuration for NVMe-oF gateway
+type NVMeOFGatewayPorts struct {
+	// IOPort is the port for NVMe-oF IO traffic (default: 4420)
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	IOPort int32 `json:"ioPort,omitempty"`
+
+	// GatewayPort is the port for the gateway service (default: 5500)
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	GatewayPort int32 `json:"gatewayPort,omitempty"`
+
+	// MonitorPort is the port for the monitor service (default: 5499)
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	MonitorPort int32 `json:"monitorPort,omitempty"`
+
+	// DiscoveryPort is the port for discovery service (default: 8009)
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	DiscoveryPort int32 `json:"discoveryPort,omitempty"`
+}
